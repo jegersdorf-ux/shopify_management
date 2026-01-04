@@ -1,0 +1,35 @@
+name: Inventory Sync
+
+on:
+  schedule:
+    - cron: '0 8 * * *' # Runs daily at 8am UTC
+  workflow_dispatch:      # Allows manual trigger button
+
+permissions:
+  contents: write
+
+jobs:
+  sync_job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: |
+          pip install PyGithub requests gspread oauth2client cloudinary pdfplumber
+
+      - name: Run Inventory Script
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_NAME: ${{ github.repository }}
+          CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+          CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+          GOOGLE_CREDENTIALS_BASE64: ${{ secrets.GOOGLE_CREDENTIALS_BASE64 }}
+        run: python inventory_master_sync.py
