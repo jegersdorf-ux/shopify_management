@@ -212,6 +212,14 @@ def clean_html_for_seo(html_content):
     clean = re.sub('<[^<]+?>', '', html_content)
     return clean[:300] 
 
+def safe_float(val):
+    """Safely converts price strings/numbers to float for comparison"""
+    if val is None: return 0.0
+    try:
+        return float(str(val).replace(",", "").strip())
+    except:
+        return 0.0
+
 # ==========================================
 #           CATALOG DISCOVERY
 # ==========================================
@@ -614,7 +622,7 @@ def create_shopify_product_shell(product_data, release_date=None):
         return None, None, None
 
 def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRAMS', price="0.00", compare_at=None):
-    """ STEP 2: Update Variant Data """
+    """ STEP 2: Update Variant Data (Exposed Error Handling) """
     if DRY_RUN or not variant_id: return
 
     shopify_unit = "GRAMS"
@@ -644,7 +652,11 @@ def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRA
         "weightUnit": shopify_unit
     }
     
-    if compare_at and float(compare_at) > float(price):
+    # Safe float compare for Compare At Price
+    price_val = safe_float(price)
+    compare_val = safe_float(compare_at)
+    
+    if compare_val > price_val:
         gql_input["compareAtPrice"] = str(compare_at)
 
     url = get_shopify_url() 
@@ -654,9 +666,12 @@ def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRA
         r = requests.post(url, json={"query": mutation, "variables": {"input": gql_input}}, headers=headers, timeout=20)
         data = r.json()
         if data.get('data', {}).get('productVariantUpdate', {}).get('userErrors'):
-             print(f"    [!] Variant Update Error: {data['data']['productVariantUpdate']['userErrors']}", flush=True)
+             print(f"    [!] Variant Update Error for {sku}: {data['data']['productVariantUpdate']['userErrors']}", flush=True)
+        else:
+             print(f"    [SUCCESS] Updated Variant {sku}", flush=True) # Confirm success
         time.sleep(0.5) 
-    except: pass
+    except Exception as e:
+        print(f"    [CRITICAL] Variant Update Crash for {sku}: {e}", flush=True)
 
 def activate_inventory_at_location(inventory_item_id, location_id):
     """ STEP 2.5: Activate Inventory at Deltona """
@@ -698,13 +713,12 @@ def update_product_metafields(product_id, game_name, faction=""):
     }
     """
     
-    # --- FIX: Game Name as LIST, Faction as SINGLE ---
     fields = [
         {
             "ownerId": product_id,
             "namespace": "custom",
             "key": "game_name",
-            "type": "list.single_line_text_field", # LIST TYPE
+            "type": "list.single_line_text_field", # LIST
             "value": json.dumps([game_name])
         }
     ]
@@ -714,7 +728,7 @@ def update_product_metafields(product_id, game_name, faction=""):
             "ownerId": product_id,
             "namespace": "custom",
             "key": "primary_faction",
-            "type": "single_line_text_field", # SINGLE TYPE
+            "type": "single_line_text_field", # SINGLE
             "value": faction
         })
     
