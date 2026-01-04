@@ -18,7 +18,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 
 # --- CONFIGURATION & SECRETS ---
-DRY_RUN = False  # Set to False to GO LIVE
+DRY_RUN = True  # Set to False to GO LIVE
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 REPO_NAME = os.getenv('REPO_NAME')
