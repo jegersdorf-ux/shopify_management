@@ -39,7 +39,6 @@ SHOPIFY_STORE_URL = os.getenv('SHOPIFY_STORE_URL')
 SHOPIFY_ACCESS_TOKEN = os.getenv('SHOPIFY_ACCESS_TOKEN')
 SHOPIFY_API_VERSION = "2025-10" 
 
-# Target Location Name (Must match exactly what is in Shopify)
 TARGET_LOCATION_NAME = "Deltona Florida Store"
 
 EMAIL_SENDER = os.getenv('EMAIL_SENDER')
@@ -59,6 +58,17 @@ ASMODEE_PREFIXES = [
     "SWA", "SWC", "SWO", "SWD", "SWF", "SWL", "SWU", "USWA", 
     "CPE", "CP", "SWP", "SWQ", "CA"
 ]
+
+# Known Factions for Matching
+KNOWN_FACTIONS = {
+    "infinity": [
+        "PanOceania", "Yu Jing", "Ariadna", "Haqqislam", "Nomads", 
+        "Combined Army", "Aleph", "Tohaa", "O-12", "JSA", "Mercenaries"
+    ],
+    "moonstone": [
+        "Commonwealth", "Dominion", "Leshavult", "Shades", "Gnomes", "Fairies"
+    ]
+}
 
 # --- CLOUDINARY SETUP ---
 RATE_LIMIT_HIT = False 
@@ -95,13 +105,10 @@ def get_shopify_url():
     return f"https://{clean_url}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
 
 def get_location_id():
-    """Fetches the ID for the Deltona Florida Store"""
     if DRY_RUN: return "gid://shopify/Location/123456789"
-    
     query = "{ locations(first: 10) { edges { node { id, name } } } }"
     url = get_shopify_url()
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
-    
     try:
         r = requests.post(url, json={"query": query}, headers=headers, timeout=10)
         data = r.json()
@@ -110,8 +117,6 @@ def get_location_id():
             if TARGET_LOCATION_NAME.lower() in loc['name'].lower():
                 print(f"[INFO] Found Location '{loc['name']}': {loc['id']}", flush=True)
                 return loc['id']
-        
-        # Fallback to first location if not found
         fallback = data['data']['locations']['edges'][0]['node']['id']
         print(f"[WARN] Target location '{TARGET_LOCATION_NAME}' not found. Using default: {fallback}", flush=True)
         return fallback
@@ -121,7 +126,6 @@ def get_location_id():
 
 def test_shopify_connection():
     print("\n--- DIAGNOSTICS ---", flush=True)
-    
     if not CLOUDINARY_CLOUD_NAME:
         print("[FAIL] CLOUDINARY_CLOUD_NAME is missing/null.", flush=True)
     else:
@@ -129,17 +133,14 @@ def test_shopify_connection():
 
     print("--- TESTING SHOPIFY CONNECTION ---", flush=True)
     url = get_shopify_url()
-    
     domain_part = url.split("//")[1].split("/")[0] if url else "None"
     print(f"Target Domain: {domain_part}", flush=True)
-    
     if "myshopify.com" not in domain_part:
         print("\n[!!!] CRITICAL WARNING: Domain is not .myshopify.com", flush=True)
         return False
 
     query = "{ shop { name, myshopifyDomain } }"
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
-    
     try:
         r = requests.post(url, json={"query": query}, headers=headers, timeout=10)
         if r.status_code == 200:
@@ -172,22 +173,36 @@ def determine_game_name_asmodee(sku):
     return "Asmodee Game"
 
 def format_title_prefix(title, game_name):
-    """Ensures titles start with the correct game prefix"""
     clean_title = str(title).strip()
     prefix = f"{game_name}: "
-    if not clean_title.startswith(game_name):
+    if not clean_title.lower().startswith(game_name.lower()):
         return f"{prefix}{clean_title}"
     return clean_title
 
 def determine_vendor(source_vendor, game_name):
-    """Maps source vendors to your preferred Publisher names"""
-    if "Moonstone" in game_name:
-        return "Goblin King Games"
-    if "Infinity" in game_name:
-        return "Corvus Belli"
-    if "Asmodee" in source_vendor:
-        return "Asmodee"
+    if "Moonstone" in game_name: return "Goblin King Games"
+    if "Infinity" in game_name: return "Corvus Belli"
+    if "Asmodee" in source_vendor: return "Asmodee"
     return source_vendor
+
+def determine_faction(game_name, source_tags, source_url=""):
+    """Derives faction from Tags (Moonstone/Warsenal) or URL (Corvus)"""
+    key = "moonstone" if "Moonstone" in game_name else "infinity"
+    
+    # 1. Check URL for Corvus
+    if "corvus" in str(source_url):
+        for f in KNOWN_FACTIONS.get('infinity', []):
+            if f.lower().replace(" ", "-") in source_url.lower():
+                return f
+    
+    # 2. Check Tags
+    if source_tags:
+        tags_str = " ".join(source_tags).lower()
+        for f in KNOWN_FACTIONS.get(key, []):
+            if f.lower() in tags_str:
+                return f
+                
+    return "" # No faction found
 
 # ==========================================
 #           CATALOG DISCOVERY
@@ -199,13 +214,11 @@ def discover_shopify_catalog(store_url, source_label):
     page = 1
     found_items = []
     
-    # Pre-calculate Game Name
     game_name = "Moonstone" if "Moonstone" in source_label else "Infinity"
     
     while True:
         try:
             if page % 5 == 0: print(f"    ...scanning page {page}...", flush=True)
-            
             r = requests.get(f"{base_url}?limit=250&page={page}", timeout=15)
             if r.status_code != 200: break
             products = r.json().get('products', [])
@@ -217,15 +230,17 @@ def discover_shopify_catalog(store_url, source_label):
                 sku = variant.get('sku')
                 if not sku: continue
                 
-                # Capture Data
                 images = [img['src'] for img in p.get('images', [])]
                 source_vendor = p.get('vendor', source_label)
+                source_tags = p.get('tags', [])
+                if isinstance(source_tags, str): source_tags = source_tags.split(',')
                 
-                # Map Fields
                 final_vendor = determine_vendor(source_vendor, game_name)
                 final_title = format_title_prefix(p.get('title', ''), game_name)
                 
-                # Price Logic (MSRP priority)
+                # Faction Logic
+                faction = determine_faction(game_name, source_tags)
+
                 base_price = variant.get('compare_at_price')
                 sell_price = variant.get('price', '0.00')
                 final_price = base_price if (base_price and float(base_price) > 0) else sell_price
@@ -235,13 +250,15 @@ def discover_shopify_catalog(store_url, source_label):
                     "title": final_title, 
                     "vendor": final_vendor,
                     "game_name": game_name,
+                    "primary_faction": faction,
                     "description": p.get('body_html', ''), 
                     "images_source": images, 
                     "pdf": "", 
                     "upc": variant.get('barcode', ''),
                     "weight": variant.get('weight', 0),
                     "weight_unit": variant.get('weight_unit', 'g'),
-                    "source_price": final_price, 
+                    "price": price,
+                    "compare_at_price": base_price,
                     "active_status": variant.get('available', True), 
                     "release_date": None
                 })
@@ -265,11 +282,15 @@ def discover_corvus_catalog():
                 slug = url.split('/')[-1]
                 raw_title = slug.replace('-', ' ').title()
                 
+                # Derive faction from URL
+                faction = determine_faction("Infinity", [], url)
+
                 found_items.append({
                     "sku": f"CB_LOOKUP_{slug}", 
                     "title": format_title_prefix(raw_title, "Infinity"),
                     "vendor": "Corvus Belli",
                     "game_name": "Infinity",
+                    "primary_faction": faction,
                     "images_source": [], 
                     "pdf": "", 
                     "url": url,
@@ -277,10 +298,109 @@ def discover_corvus_catalog():
                     "description": "",
                     "weight": 0,
                     "weight_unit": "g",
-                    "upc": ""
+                    "upc": "",
+                    "price": "0.00",
+                    "compare_at_price": None
                 })
     except: pass
     return found_items
+
+# ==========================================
+#           GOOGLE API HELPERS
+# ==========================================
+def get_credentials():
+    if not GOOGLE_CREDENTIALS_BASE64: return None
+    try:
+        return ServiceAccountCredentials.from_json_keyfile_dict(
+            json.loads(base64.b64decode(GOOGLE_CREDENTIALS_BASE64).decode()), 
+            ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        )
+    except: return None
+
+def get_sheets_service():
+    creds = get_credentials()
+    if not creds: return None
+    return build('sheets', 'v4', credentials=creds)
+
+def get_drive_service():
+    creds = get_credentials()
+    if not creds: return None
+    return build('drive', 'v3', credentials=creds)
+
+def extract_drive_id(url):
+    if not url or "drive.google.com" not in url: return None
+    match = re.search(r'folders/([a-zA-Z0-9_-]+)', url)
+    if match: return match.group(1)
+    match = re.search(r'id=([a-zA-Z0-9_-]+)', url)
+    if match: return match.group(1)
+    return None
+
+def walk_drive_folder(service, folder_id):
+    found_images = []
+    page_token = None
+    while True:
+        try:
+            query = f"'{folder_id}' in parents and trashed = false"
+            results = service.files().list(
+                q=query, pageSize=1000, 
+                fields="nextPageToken, files(id, name, mimeType, webContentLink)",
+                pageToken=page_token
+            ).execute()
+            items = results.get('files', [])
+            for item in items:
+                if 'image/' in item['mimeType']:
+                    if item.get('webContentLink'): found_images.append(item.get('webContentLink'))
+                elif item['mimeType'] == 'application/vnd.google-apps.folder':
+                    found_images.extend(walk_drive_folder(service, item['id']))
+            page_token = results.get('nextPageToken')
+            if not page_token: break
+        except: break
+    return found_images
+
+def get_asmodee_image_links(url):
+    if not url: return []
+    folder_id = extract_drive_id(url)
+    if folder_id:
+        service = get_drive_service()
+        if service: return walk_drive_folder(service, folder_id)
+    return [url]
+
+def get_visible_sheet_values(sheet_url):
+    match_id = re.search(r'/d/([a-zA-Z0-9-_]+)', sheet_url)
+    if not match_id: return []
+    spreadsheet_id = match_id.group(1)
+    target_gid = 0
+    match_gid = re.search(r'[#&]gid=([0-9]+)', sheet_url)
+    if match_gid: target_gid = int(match_gid.group(1))
+
+    service = get_sheets_service()
+    if not service: return []
+    
+    try:
+        spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id, includeGridData=True).execute()
+        target_sheet = None
+        for s in spreadsheet['sheets']:
+            if s['properties']['sheetId'] == target_gid:
+                target_sheet = s
+                break
+        if not target_sheet: return []
+        print(f"    > Reading Tab: {target_sheet['properties']['title']} (GID: {target_gid})", flush=True)
+        
+        rows = target_sheet['data'][0].get('rowData', [])
+        visible_rows = []
+        for row in rows:
+            user_hidden = row.get('rowMetadata', {}).get('hiddenByUser', False)
+            filter_hidden = row.get('rowMetadata', {}).get('hiddenByFilter', False)
+            if user_hidden or filter_hidden: continue 
+            values = []
+            if 'values' in row:
+                for cell in row['values']:
+                    val = cell.get('userEnteredValue', {})
+                    text = val.get('stringValue', str(val.get('numberValue', '')))
+                    values.append(text)
+            visible_rows.append(values)
+        return visible_rows
+    except: return []
 
 # ==========================================
 #           SCRAPING / RESOLVING
@@ -423,7 +543,7 @@ def create_shopify_product_shell(product_data, release_date=None):
     """ STEP 1: Create Product Shell """
     if DRY_RUN:
         log_action("SHOPIFY", product_data['sku'], f"Draft Shell: {product_data['title']}")
-        return "gid://shopify/Product/1", "gid://shopify/ProductVariant/1"
+        return "gid://shopify/Product/1", "gid://shopify/ProductVariant/1", None
 
     tags = ["Review Needed", "New Auto-Import", product_data['vendor']]
     if release_date: tags.append(f"Release: {release_date}")
@@ -432,7 +552,7 @@ def create_shopify_product_shell(product_data, release_date=None):
         "title": product_data['title'],
         "status": "DRAFT",
         "vendor": product_data['vendor'],
-        "productType": "Dice Sets & Games", # User Requested Category
+        "productType": "Dice Sets & Games", 
         "tags": tags,
         "descriptionHtml": product_data.get('description') or (f"<p>Release: {release_date}</p>" if release_date else "")
     }
@@ -472,11 +592,10 @@ def create_shopify_product_shell(product_data, release_date=None):
         print(f"    [!] Connect Error (Shell): {e}", flush=True)
         return None, None, None
 
-def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRAMS', price="0.00"):
+def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRAMS', price="0.00", compare_at=None):
     """ STEP 2: Update Variant Data """
     if DRY_RUN or not variant_id: return
 
-    # Normalize Weight Unit
     shopify_unit = "GRAMS"
     w_unit_clean = str(weight_unit).upper()
     if "KG" in w_unit_clean: shopify_unit = "KILOGRAMS"
@@ -497,12 +616,16 @@ def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRA
         "sku": sku,
         "inventoryManagement": "SHOPIFY", 
         "inventoryPolicy": "DENY",
-        "price": price if float(price) > 0 else "0.00", 
+        "taxable": True, # Explicitly TRUE as requested
+        "price": str(price),
         "barcode": upc or "",
         "weight": float(weight),
         "weightUnit": shopify_unit
     }
     
+    if compare_at and float(compare_at) > float(price):
+        gql_input["compareAtPrice"] = str(compare_at)
+
     url = get_shopify_url() 
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
     
@@ -531,7 +654,6 @@ def activate_inventory_at_location(inventory_item_id, location_id):
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
     
     try:
-        # Set initial stock to 0 but activate the location
         r = requests.post(url, json={"query": mutation, "variables": {"inventoryItemId": inventory_item_id, "locationId": location_id, "available": 0}}, headers=headers, timeout=20)
         data = r.json()
         if data.get('data', {}).get('inventoryActivate', {}).get('userErrors'):
@@ -541,8 +663,8 @@ def activate_inventory_at_location(inventory_item_id, location_id):
         time.sleep(0.5) 
     except: pass
 
-def update_product_metafields(product_id, game_name):
-    """ STEP 2.75: Add Game Name Metafield """
+def update_product_metafields(product_id, game_name, faction=""):
+    """ STEP 2.75: Add Metafields """
     if DRY_RUN or not product_id: return
 
     mutation = """
@@ -554,23 +676,30 @@ def update_product_metafields(product_id, game_name):
     }
     """
     
-    variables = {
-        "metafields": [
-            {
-                "ownerId": product_id,
-                "namespace": "custom",
-                "key": "game_name",
-                "type": "single_line_text_field",
-                "value": game_name
-            }
-        ]
-    }
+    fields = [
+        {
+            "ownerId": product_id,
+            "namespace": "custom",
+            "key": "game_name",
+            "type": "single_line_text_field",
+            "value": game_name
+        }
+    ]
+    
+    if faction:
+        fields.append({
+            "ownerId": product_id,
+            "namespace": "custom",
+            "key": "primary_faction",
+            "type": "single_line_text_field",
+            "value": faction
+        })
     
     url = get_shopify_url() 
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
     
     try:
-        r = requests.post(url, json={"query": mutation, "variables": variables}, headers=headers, timeout=20)
+        r = requests.post(url, json={"query": mutation, "variables": {"metafields": fields}}, headers=headers, timeout=20)
         data = r.json()
         if data.get('data', {}).get('metafieldsSet', {}).get('userErrors'):
              print(f"    [!] Metafield Error: {data['data']['metafieldsSet']['userErrors']}", flush=True)
@@ -715,7 +844,9 @@ def main():
                             "description": "",
                             "weight": 0,
                             "weight_unit": "g",
-                            "source_price": "0.00"
+                            "price": "0.00",
+                            "compare_at_price": None,
+                            "primary_faction": ""
                         })
     except Exception as e: print(f"Sheet Error: {e}", flush=True)
 
@@ -799,16 +930,17 @@ def main():
                     item.get('upc'),
                     weight=item.get('weight', 0),
                     weight_unit=item.get('weight_unit', 'g'),
-                    price=item.get('source_price', "0.00")
+                    price=item.get('price', "0.00"),
+                    compare_at=item.get('compare_at_price')
                 )
                 
                 # 2. Activate Inventory at Deltona
                 if inventory_item_id and DELTONA_LOCATION_ID:
                     activate_inventory_at_location(inventory_item_id, DELTONA_LOCATION_ID)
                 
-                # 3. Set Game Name Metafield
+                # 3. Set Metafields (Game Name + Faction)
                 if item.get('game_name'):
-                    update_product_metafields(prod_id, item['game_name'])
+                    update_product_metafields(prod_id, item['game_name'], item.get('primary_faction', ''))
 
                 # 4. Attach Images
                 update_shopify_images(prod_id, cloud_urls, alt_text=item['title'])
