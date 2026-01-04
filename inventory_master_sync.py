@@ -31,7 +31,7 @@ GOOGLE_CREDENTIALS_BASE64 = os.getenv('GOOGLE_CREDENTIALS_BASE64')
 
 SHOPIFY_STORE_URL = os.getenv('SHOPIFY_STORE_URL')
 SHOPIFY_ACCESS_TOKEN = os.getenv('SHOPIFY_ACCESS_TOKEN')
-SHOPIFY_API_VERSION = "2025-10" # Stable Version
+SHOPIFY_API_VERSION = "2025-10" 
 
 EMAIL_SENDER = os.getenv('EMAIL_SENDER')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
@@ -67,16 +67,25 @@ def log_action(action_type, sku, details):
     dry_run_logs.append(entry)
 
 # ==========================================
-#           SHOPIFY HELPER (DIAGNOSTIC)
+#           SHOPIFY HELPER (SMART FIX)
 # ==========================================
 def get_shopify_url():
     if not SHOPIFY_STORE_URL: return None
     
-    # Aggressive cleaning
     clean_url = SHOPIFY_STORE_URL.strip()
-    clean_url = clean_url.replace("https://", "").replace("http://", "")
     
-    # If user pasted "store.myshopify.com/admin", strip the /admin
+    # CASE 1: User pasted the browser URL (e.g., admin.shopify.com/store/my-shop)
+    if "admin.shopify.com" in clean_url and "/store/" in clean_url:
+        try:
+            # Extract the handle after /store/
+            handle = clean_url.split("/store/")[1].split("/")[0]
+            print(f"    > Auto-Corrected URL: '{handle}.myshopify.com' (derived from admin link)")
+            return f"https://{handle}.myshopify.com/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+        except:
+            pass # Fallback to standard cleaning if split fails
+
+    # CASE 2: User pasted standard domain
+    clean_url = clean_url.replace("https://", "").replace("http://", "")
     if "/" in clean_url:
         clean_url = clean_url.split("/")[0]
         
@@ -86,17 +95,16 @@ def test_shopify_connection():
     print("\n--- TESTING SHOPIFY CONNECTION ---")
     url = get_shopify_url()
     
-    # REVEAL DOMAIN FOR DEBUGGING (Safe, not the token)
+    # REVEAL DOMAIN FOR DEBUGGING
     domain_part = url.split("//")[1].split("/")[0] if url else "None"
     print(f"Target Domain: {domain_part}") 
-    print(f"Full Endpoint: {url}")
     
     if "myshopify.com" not in domain_part:
-        print("\n[!!!] WARNING: You are not using a '.myshopify.com' domain.")
+        print("\n[!!!] CRITICAL WARNING:")
         print(f"      You are using: '{domain_part}'")
-        print("      Shopify API calls usually FAIL on custom domains.")
-        print("      Please update your Github Secret 'SHOPIFY_STORE_URL' to your internal handle.")
-        print("      Example: 'extra-turn-games.myshopify.com'\n")
+        print("      This looks like the 'Human Login' page, not the API address.")
+        print("      If this fails, please update your GitHub Secret 'SHOPIFY_STORE_URL'.")
+        print("      It MUST be your internal handle, usually: 'extra-turn-games.myshopify.com'\n")
 
     query = "{ shop { name, myshopifyDomain } }"
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
@@ -108,6 +116,11 @@ def test_shopify_connection():
             print(f"SUCCESS: Connected to '{shop.get('name')}'")
             print("----------------------------------\n")
             return True
+        elif r.status_code == 403:
+             print(f"FAIL: Status 403 (Forbidden).")
+             print("      This usually means you are using 'admin.shopify.com' instead of 'myshopify.com'.")
+             print("      Shopify's firewall is blocking the script.")
+             return False
         else:
             print(f"FAIL: Status {r.status_code}")
             print(f"Response: {r.text}")
