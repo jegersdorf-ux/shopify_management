@@ -1,0 +1,6 @@
+PyGithub
+requests
+gspread
+oauth2client
+cloudinary
+pdfplumber
