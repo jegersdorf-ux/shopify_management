@@ -18,7 +18,9 @@ from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 
 # --- CONFIGURATION & SECRETS ---
-DRY_RUN = False  # Set to False to GO LIVE
+DRY_RUN = False        # <--- LIVE MODE (Will create Drafts)
+TEST_MODE = True       # <--- SAFETY ON (Stops after 10 items)
+TEST_LIMIT = 10        # Number of items to process in Test Mode
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 REPO_NAME = os.getenv('REPO_NAME')
@@ -375,7 +377,7 @@ def get_col_index(headers, name):
 # ==========================================
 
 def main():
-    print(f"--- STARTING MASTER SYNC (DRY RUN MODE: {DRY_RUN}) ---")
+    print(f"--- STARTING MASTER SYNC (TEST MODE: {TEST_MODE} | LIMIT: {TEST_LIMIT}) ---")
     
     auth = Auth.Token(GITHUB_TOKEN)
     g = Github(auth=auth)
@@ -393,7 +395,7 @@ def main():
     warsenal_items = discover_shopify_catalog("https://warsen.al", "Warsenal")
     corvus_skeletons = discover_corvus_catalog()
     
-    # 3. LOAD ASMODEE
+    # 3. LOAD ASMODEE (VISIBLE ROWS ONLY)
     asmodee_items = []
     try:
         print("Connecting to Google Sheet (Filtering Hidden Rows)...")
@@ -416,8 +418,10 @@ def main():
                     sku = str(row[idx_sku]).strip()
                     if not sku: continue
                     if any(sku.startswith(p) for p in ASMODEE_PREFIXES):
+                        # Recursive Folder Scan for images
                         raw_link = str(row[idx_img]) if idx_img != -1 else ""
                         resolved_images = get_asmodee_image_links(raw_link)
+                        
                         asmodee_items.append({
                             "sku": sku, "title": row[idx_title], "vendor": "Asmodee",
                             "images_source": resolved_images,
@@ -433,8 +437,15 @@ def main():
     new_items_added = []
     active_conflicts = []
     prompts_to_generate = []
+    
+    items_processed_count = 0 # Counter for Test Mode
 
     for item in all_rows:
+        # TEST MODE CHECK
+        if TEST_MODE and items_processed_count >= TEST_LIMIT:
+            print(f"--- TEST LIMIT REACHED ({TEST_LIMIT} items). Stopping Loop. ---")
+            break
+
         if item.get('is_skeleton'):
             if not DRY_RUN: time.sleep(0.5)
             resolved = resolve_corvus_skeleton(item)
@@ -468,6 +479,7 @@ def main():
                 }
                 inventory_map[sku] = new_entry
                 updates_made = True
+                items_processed_count += 1
                 continue
             # ------------------------------------
 
@@ -481,6 +493,7 @@ def main():
             inventory_map[sku] = new_entry
             new_items_added.append(new_entry)
             updates_made = True
+            items_processed_count += 1
             
             if item.get('pdf') or vendor == "Asmodee":
                 txt = extract_pdf_text(item.get('pdf')) if item.get('pdf') else ""
@@ -488,6 +501,7 @@ def main():
                 prompts_to_generate.append(prompt)
 
         else:
+            # We count an existing item as "Processed" only if we update it or check it
             has_images = existing_product.get('cloudinary_images') or existing_product.get('cloudinary_url')
             if (not has_images) and source_images:
                 cloud_urls = process_and_upload_images(sku, source_images)
@@ -500,6 +514,8 @@ def main():
                 if s_data and s_data['status'] == 'ACTIVE' and "Review Needed" not in s_data['tags']:
                     add_tag(s_data['id'], "Review Needed", sku)
                     active_conflicts.append(existing_product)
+            
+            items_processed_count += 1 # Count checked items towards limit
 
     if new_items_added: send_email(f"Import: {len(new_items_added)} New", "Check Shopify.")
     if active_conflicts: send_email(f"ALERT: {len(active_conflicts)} Conflicts", "Check Shopify.")
