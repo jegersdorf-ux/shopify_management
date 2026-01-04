@@ -71,7 +71,7 @@ dry_run_logs = []
 
 def log_action(action_type, sku, details):
     entry = f"| {action_type} | **{sku}** | {details} |"
-    print(f"[DRY RUN] {entry}")
+    print(f"[DRY RUN] {entry}", flush=True)
     dry_run_logs.append(entry)
 
 # ==========================================
@@ -92,40 +92,39 @@ def get_shopify_url():
     return f"https://{clean_url}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
 
 def test_shopify_connection():
-    print("\n--- TESTING SHOPIFY CONNECTION ---")
+    print("\n--- TESTING SHOPIFY CONNECTION ---", flush=True)
     url = get_shopify_url()
     
     domain_part = url.split("//")[1].split("/")[0] if url else "None"
-    print(f"Target Domain: {domain_part}") 
+    print(f"Target Domain: {domain_part}", flush=True)
     
     if "myshopify.com" not in domain_part:
-        print("\n[!!!] CRITICAL WARNING:")
-        print(f"      You are using: '{domain_part}'")
-        print("      This looks like the 'Human Login' page, not the API address.")
+        print("\n[!!!] CRITICAL WARNING:", flush=True)
+        print(f"      You are using: '{domain_part}'", flush=True)
         return False
 
     query = "{ shop { name, myshopifyDomain } }"
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
     
     try:
-        r = requests.post(url, json={"query": query}, headers=headers)
+        r = requests.post(url, json={"query": query}, headers=headers, timeout=10) # Added timeout
         if r.status_code == 200:
             shop = r.json().get('data', {}).get('shop', {})
-            print(f"SUCCESS: Connected to '{shop.get('name')}'")
-            print("----------------------------------\n")
+            print(f"SUCCESS: Connected to '{shop.get('name')}'", flush=True)
+            print("----------------------------------\n", flush=True)
             return True
         elif r.status_code == 403:
-             print(f"FAIL: Status 403 (Forbidden). Firewall blocking.")
+             print(f"FAIL: Status 403 (Forbidden). Firewall blocking.", flush=True)
              return False
         elif r.status_code == 401:
-             print(f"FAIL: Status 401 (Unauthorized). Invalid Token.")
+             print(f"FAIL: Status 401 (Unauthorized). Invalid Token.", flush=True)
              return False
         else:
-            print(f"FAIL: Status {r.status_code}")
-            print(f"Response: {r.text}")
+            print(f"FAIL: Status {r.status_code}", flush=True)
+            print(f"Response: {r.text}", flush=True)
             return False
     except Exception as e:
-        print(f"FAIL: Exception connecting: {e}")
+        print(f"FAIL: Exception connecting: {e}", flush=True)
         return False
 
 # ==========================================
@@ -207,7 +206,7 @@ def get_visible_sheet_values(sheet_url):
                 target_sheet = s
                 break
         if not target_sheet: return []
-        print(f"    > Reading Tab: {target_sheet['properties']['title']} (GID: {target_gid})")
+        print(f"    > Reading Tab: {target_sheet['properties']['title']} (GID: {target_gid})", flush=True)
         
         rows = target_sheet['data'][0].get('rowData', [])
         visible_rows = []
@@ -230,13 +229,13 @@ def get_visible_sheet_values(sheet_url):
 # ==========================================
 
 def discover_shopify_catalog(store_url, vendor_name):
-    print(f"  > Discovering {vendor_name} Catalog...")
+    print(f"  > Discovering {vendor_name} Catalog...", flush=True)
     base_url = f"{store_url}/products.json"
     page = 1
     found_items = []
     while True:
         try:
-            r = requests.get(f"{base_url}?limit=250&page={page}")
+            r = requests.get(f"{base_url}?limit=250&page={page}", timeout=15) # Added timeout
             if r.status_code != 200: break
             products = r.json().get('products', [])
             if not products: break
@@ -257,11 +256,11 @@ def discover_shopify_catalog(store_url, vendor_name):
     return found_items
 
 def discover_corvus_catalog():
-    print("  > Discovering Corvus Belli Catalog...")
+    print("  > Discovering Corvus Belli Catalog...", flush=True)
     sitemap_url = "https://store.corvusbelli.com/sitemap.xml"
     found_items = []
     try:
-        r = requests.get(sitemap_url)
+        r = requests.get(sitemap_url, timeout=15) # Added timeout
         if r.status_code == 200:
             urls = re.findall(r'<loc>(.*?)</loc>', r.text)
             p_urls = [u for u in urls if '/products/' in u or '/wargames/' in u or '/boardgames/' in u]
@@ -284,11 +283,11 @@ def scrape_asmodee_status(sku):
     search_url = f"https://store.asmodee.com/search?q={sku}&type=product"
     if DRY_RUN: return True
     try:
-        r = requests.get(search_url)
+        r = requests.get(search_url, timeout=10) # Added timeout
         soup = BeautifulSoup(r.text, 'html.parser')
         link = soup.find('a', href=re.compile(r'/products/'))
         if not link: return False
-        r2 = requests.get("https://store.asmodee.com" + link['href'])
+        r2 = requests.get("https://store.asmodee.com" + link['href'], timeout=10) # Added timeout
         text = BeautifulSoup(r2.text, 'html.parser').get_text().lower()
         return "add to cart" in text and "sold out" not in text
     except: return False
@@ -297,7 +296,7 @@ def resolve_corvus_skeleton(item):
     url = item['url']
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        r = requests.get(url, headers=headers)
+        r = requests.get(url, headers=headers, timeout=10) # Added timeout
         soup = BeautifulSoup(r.text, 'html.parser')
         sku = None
         ref_match = re.search(r'Ref:\s*([A-Za-z0-9\-]+)', soup.get_text())
@@ -341,17 +340,17 @@ def send_email(subject, body_html):
     except: pass
 
 def process_and_upload_images(sku, source_urls):
-    global RATE_LIMIT_HIT # Allow access to the global flag
+    global RATE_LIMIT_HIT 
     
     if not source_urls: return []
     uploaded_urls = []
-    source_urls = list(set(source_urls)) # Dedup
+    source_urls = list(set(source_urls)) 
 
     for i, url in enumerate(source_urls):
         if not url or "http" not in url: continue
         
         if RATE_LIMIT_HIT:
-            print(f"    [!] Skipping Cloudinary upload for {sku} (Rate Limit Active). Using source URL.")
+            print(f"    [!] Skipping Cloudinary upload for {sku} (Rate Limit Active). Using source URL.", flush=True)
             uploaded_urls.append(url)
             continue
 
@@ -376,11 +375,11 @@ def process_and_upload_images(sku, source_urls):
         except Exception as e:
             error_msg = str(e)
             if "420" in error_msg or "Rate Limit" in error_msg:
-                print(f"    [🛑] CLOUDINARY RATE LIMIT REACHED. Switching to pass-through mode.")
+                print(f"    [🛑] CLOUDINARY RATE LIMIT REACHED. Switching to pass-through mode.", flush=True)
                 RATE_LIMIT_HIT = True
                 uploaded_urls.append(url) 
             else:
-                print(f"    [!] Cloudinary Upload Failed for {sku}: {error_msg}")
+                print(f"    [!] Cloudinary Upload Failed for {sku}: {error_msg}", flush=True)
                 pass
             
     return uploaded_urls
@@ -431,28 +430,25 @@ def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
     
     try:
-        r = requests.post(url, json={"query": mutation, "variables": variables}, headers=headers)
+        r = requests.post(url, json={"query": mutation, "variables": variables}, headers=headers, timeout=20) # Added timeout
         if r.status_code == 200:
             data = r.json()
             if 'errors' in data:
-                print(f"    [!] Shopify API Error: {json.dumps(data['errors'])}")
+                print(f"    [!] Shopify API Error: {json.dumps(data['errors'])}", flush=True)
                 return None
             if data['data']['productCreate']['userErrors']:
-                print(f"    [!] Shopify UserError: {data['data']['productCreate']['userErrors']}")
+                print(f"    [!] Shopify UserError: {data['data']['productCreate']['userErrors']}", flush=True)
                 return None
-            print(f"    [SUCCESS] Created Draft: {data['data']['productCreate']['product']['id']}")
+            print(f"    [SUCCESS] Created Draft: {data['data']['productCreate']['product']['id']}", flush=True)
             return data['data']['productCreate']['product']['id']
         else:
-            print(f"    [!] Shopify API Status {r.status_code}: {r.text}")
+            print(f"    [!] Shopify API Status {r.status_code}: {r.text}", flush=True)
             return None
     except Exception as e:
-        print(f"    [!] Connect Error: {e}")
+        print(f"    [!] Connect Error: {e}", flush=True)
         return None
 
 def update_shopify_images(shopify_id, image_urls):
-    """
-    Adds images to an existing Shopify product.
-    """
     if DRY_RUN or not image_urls: return
 
     gql_media = []
@@ -476,13 +472,13 @@ def update_shopify_images(shopify_id, image_urls):
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
     
     try:
-        r = requests.post(url, json={"query": mutation, "variables": variables}, headers=headers)
+        r = requests.post(url, json={"query": mutation, "variables": variables}, headers=headers, timeout=20)
         if r.status_code == 200:
             data = r.json()
             if data['data']['productCreateMedia']['mediaUserErrors']:
-                print(f"    [!] Image Sync Error: {data['data']['productCreateMedia']['mediaUserErrors']}")
+                print(f"    [!] Image Sync Error: {data['data']['productCreateMedia']['mediaUserErrors']}", flush=True)
             else:
-                print(f"    [SUCCESS] Synced {len(image_urls)} images to existing product.")
+                print(f"    [SUCCESS] Synced {len(image_urls)} images to existing product.", flush=True)
     except: pass
 
 def check_shopify_status(sku):
@@ -493,7 +489,7 @@ def check_shopify_status(sku):
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
     
     try:
-        r = requests.post(url, json={"query": query, "variables": {"query": f"sku:{sku}"}}, headers=headers)
+        r = requests.post(url, json={"query": query, "variables": {"query": f"sku:{sku}"}}, headers=headers, timeout=15)
         node = r.json()['data']['products']['edges'][0]['node']
         if node['variants']['edges'][0]['node']['sku'] == sku:
             return {"id": node['id'], "status": node['status'], "tags": node['tags']}
@@ -505,7 +501,7 @@ def add_tag(shopify_id, tag, sku):
     url = get_shopify_url()
     mutation = """mutation tagsAdd($id: ID!, $tags: [String!]!) { tagsAdd(id: $id, tags: $tags) { node { id } } }"""
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
-    requests.post(url, json={"query": mutation, "variables": {"id": shopify_id, "tags": [tag]}}, headers=headers)
+    requests.post(url, json={"query": mutation, "variables": {"id": shopify_id, "tags": [tag]}}, headers=headers, timeout=10)
 
 def extract_pdf_text(pdf_url):
     if not pdf_url or "http" not in pdf_url: return ""
@@ -513,7 +509,7 @@ def extract_pdf_text(pdf_url):
     try:
         if "drive.google.com" in pdf_url and "/view" in pdf_url:
              pdf_url = pdf_url.replace("/file/d/", "/uc?id=").replace("/view", "").split("?")[0] + "?export=download"
-        r = requests.get(pdf_url, allow_redirects=True)
+        r = requests.get(pdf_url, allow_redirects=True, timeout=30)
         if r.status_code != 200: return ""
         with pdfplumber.open(io.BytesIO(r.content)) as pdf:
             return "\n".join([page.extract_text() or "" for page in pdf.pages])
@@ -529,10 +525,10 @@ def get_col_index(headers, name):
 # ==========================================
 
 def main():
-    print(f"--- STARTING MASTER SYNC (TEST MODE: {TEST_MODE} | LIMIT: {TEST_LIMIT} SUCCESSFUL ITEMS) ---")
+    print(f"--- STARTING MASTER SYNC (TEST MODE: {TEST_MODE} | LIMIT: {TEST_LIMIT} SUCCESSFUL ITEMS) ---", flush=True)
     
     if not test_shopify_connection():
-        print("CRITICAL: Cannot connect to Shopify. Exiting.")
+        print("CRITICAL: Cannot connect to Shopify. Exiting.", flush=True)
         return
 
     auth = Auth.Token(GITHUB_TOKEN)
@@ -544,7 +540,7 @@ def main():
         inventory_data = json.loads(contents.decoded_content.decode())
     except: inventory_data = []
     inventory_map = {item.get('sku'): item for item in inventory_data}
-    print(f"Loaded {len(inventory_map)} existing items.")
+    print(f"Loaded {len(inventory_map)} existing items.", flush=True)
 
     moonstone_items = discover_shopify_catalog("https://shop.moonstonethegame.com", "Moonstone")
     warsenal_items = discover_shopify_catalog("https://warsen.al", "Warsenal")
@@ -552,7 +548,7 @@ def main():
     
     asmodee_items = []
     try:
-        print("Connecting to Google Sheet (Filtering Hidden Rows)...")
+        print("Connecting to Google Sheet (Filtering Hidden Rows)...", flush=True)
         all_values = get_visible_sheet_values(SHEET_URL)
         if all_values:
             h_idx = -1
@@ -576,10 +572,10 @@ def main():
                             "images_source": resolved_images,
                             "pdf": row[idx_pdf], "active_status": None 
                         })
-    except Exception as e: print(f"Sheet Error: {e}")
+    except Exception as e: print(f"Sheet Error: {e}", flush=True)
 
     all_rows = asmodee_items + moonstone_items + warsenal_items + corvus_skeletons
-    print(f"Total Combined Queue: {len(all_rows)} items")
+    print(f"Total Combined Queue: {len(all_rows)} items", flush=True)
     
     updates_made = False
     new_items_added = []
@@ -591,11 +587,10 @@ def main():
 
     for item in all_rows:
         if TEST_MODE and successful_drafts_count >= TEST_LIMIT:
-            print(f"--- TEST LIMIT REACHED ({TEST_LIMIT} successful uploads). Stopping Loop. ---")
+            print(f"--- TEST LIMIT REACHED ({TEST_LIMIT} successful uploads). Stopping Loop. ---", flush=True)
             break
 
         if item.get('is_skeleton'):
-            if not DRY_RUN: time.sleep(0.5)
             resolved = resolve_corvus_skeleton(item)
             if not resolved: continue
             item = resolved
@@ -605,11 +600,10 @@ def main():
         
         # Verbose progress check
         if (skips_count + successful_drafts_count) % 50 == 0:
-            print(f"Processing... (Skips: {skips_count} | Success: {successful_drafts_count})")
+            print(f"Processing... (Skips: {skips_count} | Success: {successful_drafts_count})", flush=True)
 
         is_avail = True
         if vendor == "Asmodee":
-            if not DRY_RUN: time.sleep(0.5)
             is_avail = scrape_asmodee_status(sku)
         else:
             is_avail = item.get('active_status', True)
@@ -622,9 +616,8 @@ def main():
                 skips_count += 1
                 continue
             
-            # --- MODIFIED RULE: NO IMAGE = SKIP ONLY FOR ASMODEE ---
             if vendor == "Asmodee" and not source_images:
-                print(f"    [SKIP] Asmodee Item {sku} has no images.")
+                print(f"    [SKIP] Asmodee Item {sku} has no images.", flush=True)
                 new_entry = {
                     "sku": sku, "title": item['title'], "vendor": vendor,
                     "cloudinary_images": [], "shopify_id": None,
@@ -635,9 +628,8 @@ def main():
                 updates_made = True
                 skips_count += 1
                 continue
-            # -----------------------------------------------------
 
-            print(f"   > Uploading {sku}...")
+            print(f"   > Uploading {sku}...", flush=True)
             cloud_urls = process_and_upload_images(sku, source_images)
             shopify_id = create_shopify_draft(item, cloud_urls, item.get('release_date'), item.get('upc'))
             
@@ -650,9 +642,9 @@ def main():
                 inventory_map[sku] = new_entry
                 new_items_added.append(new_entry)
                 updates_made = True
-                successful_drafts_count += 1 # <--- INCREMENT SUCCESS ONLY HERE
+                successful_drafts_count += 1 
             else:
-                 print(f"   [FAIL] Shopify upload failed for {sku}")
+                 print(f"   [FAIL] Shopify upload failed for {sku}", flush=True)
                  skips_count += 1
             
             if item.get('pdf') or vendor == "Asmodee":
@@ -662,13 +654,9 @@ def main():
 
         else:
             # --- SELF HEALING LOGIC ---
-            # If we know about the product, but stored 'cloudinary_images' is empty/null,
-            # we should try to fetch them again and update Shopify.
-            
             stored_images = existing_product.get('cloudinary_images')
             shopify_id = existing_product.get('shopify_id')
             
-            # Try to recover ID if missing but product might exist
             if not shopify_id:
                 status_data = check_shopify_status(sku)
                 if status_data: 
@@ -677,7 +665,7 @@ def main():
                     updates_made = True
 
             if (not stored_images) and source_images:
-                print(f"   > Backfilling images for {sku}...")
+                print(f"   > Backfilling images for {sku}...", flush=True)
                 cloud_urls = process_and_upload_images(sku, source_images)
                 
                 if cloud_urls:
@@ -685,18 +673,14 @@ def main():
                     updates_made = True
                     
                     if shopify_id:
-                        print(f"   > Syncing new images to Shopify Product {sku}...")
+                        print(f"   > Syncing new images to Shopify Product {sku}...", flush=True)
                         update_shopify_images(shopify_id, cloud_urls)
                         successful_drafts_count += 1
             else:
                 skips_count += 1
                 
-            # --- EXISTING CONFLICT CHECK ---
             if not is_avail:
-                if shopify_id: # Use cached ID if available
-                    # We can assume it's active if we found it, but checking status is safer
-                    pass 
-                else:
+                if not shopify_id:
                     s_data = check_shopify_status(sku)
                     if s_data and s_data['status'] == 'ACTIVE' and "Review Needed" not in s_data['tags']:
                         add_tag(s_data['id'], "Review Needed", sku)
@@ -706,18 +690,6 @@ def main():
     if active_conflicts: send_email(f"ALERT: {len(active_conflicts)} Conflicts", "Check Shopify.")
 
     if DRY_RUN:
-        print("Saving Dry Run Report...")
+        print("Saving Dry Run Report...", flush=True)
         report = "\n".join(dry_run_logs)
-        try: repo.update_file(REPORT_FILE_PATH, "Report", report, repo.get_contents(REPORT_FILE_PATH).sha)
-        except: repo.create_file(REPORT_FILE_PATH, "Report", report)
-    elif updates_made:
-        print("Saving JSON...")
-        try: repo.update_file(JSON_FILE_PATH, "Sync", json.dumps(list(inventory_map.values()), indent=2), repo.get_contents(JSON_FILE_PATH).sha)
-        except: repo.create_file(JSON_FILE_PATH, "Sync", json.dumps(list(inventory_map.values()), indent=2))
-        if prompts_to_generate:
-             full_prompt = "\n".join(prompts_to_generate)
-             try: repo.update_file(PROMPTS_FILE_PATH, "Prompts", full_prompt, repo.get_contents(PROMPTS_FILE_PATH).sha)
-             except: repo.create_file(PROMPTS_FILE_PATH, "Prompts", full_prompt)
-
-if __name__ == "__main__":
-    main()
+        try: repo.update_file(REPORT_FILE
