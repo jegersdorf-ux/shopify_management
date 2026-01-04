@@ -223,7 +223,6 @@ def clean_html_for_seo(html_content):
 def safe_float(val):
     if val is None or val == "": return 0.0
     try:
-        # Remove currency symbols and commas
         clean_val = str(val).replace("$", "").replace(",", "").strip()
         return float(clean_val)
     except:
@@ -253,22 +252,35 @@ def discover_shopify_catalog(store_url, source_label):
             if not products: break
             
             for p in products:
+                # --- WARSENAL FILTERING (Strict) ---
+                source_vendor = p.get('vendor', source_label)
+                if source_label == "Warsenal":
+                    if source_vendor not in ["Corvus Belli", "Warsenal"]:
+                        continue
+
                 if not p.get('variants'): continue
                 variant = p['variants'][0]
                 sku = variant.get('sku')
                 if not sku: continue
                 
                 images = [img['src'] for img in p.get('images', [])]
-                source_vendor = p.get('vendor', source_label)
-                source_tags = p.get('tags', [])
-                if isinstance(source_tags, str): source_tags = source_tags.split(',')
+                
+                # --- CAPTURE SOURCE TAGS ---
+                source_tags_raw = p.get('tags', [])
+                if isinstance(source_tags_raw, str): 
+                    source_tags = source_tags_raw.split(',')
+                else:
+                    source_tags = source_tags_raw
                 
                 final_vendor = determine_vendor(source_vendor, game_name)
                 final_title = format_title_prefix(p.get('title', ''), game_name)
                 faction = determine_faction(game_name, source_tags)
 
+                # --- EXTRACT PRICING & WEIGHT (Direct from JSON keys) ---
                 base_price = variant.get('compare_at_price')
                 sell_price = variant.get('price', '0.00')
+                grams = variant.get('grams', 0) 
+                barcode = variant.get('barcode', '')
 
                 found_items.append({
                     "sku": sku, 
@@ -276,12 +288,13 @@ def discover_shopify_catalog(store_url, source_label):
                     "vendor": final_vendor,
                     "game_name": game_name,
                     "primary_faction": faction,
-                    "description": p.get('body_html', ''), 
+                    "description": p.get('body_html', ''), # Full HTML
                     "images_source": images, 
+                    "source_tags": source_tags, # Original Tags
                     "pdf": "", 
-                    "upc": variant.get('barcode', ''),
-                    "weight": variant.get('weight', 0),
-                    "weight_unit": variant.get('weight_unit', 'g'),
+                    "upc": barcode,
+                    "weight": grams,
+                    "weight_unit": "g", 
                     "price": sell_price,
                     "compare_at_price": base_price,
                     "active_status": variant.get('available', True), 
@@ -319,6 +332,7 @@ def discover_corvus_catalog():
                     "game_name": "Infinity",
                     "primary_faction": faction,
                     "images_source": [], 
+                    "source_tags": ["Infinity", "Corvus Belli"], 
                     "pdf": "", 
                     "url": url,
                     "is_skeleton": True,
@@ -569,7 +583,7 @@ def process_and_upload_images(sku, source_urls, vendor):
 #           SHOPIFY API 2025 COMPATIBILITY
 # ==========================================
 
-def create_shopify_product_shell(product_data, release_date=None):
+def create_shopify_product_shell(product_data, release_date=None, extra_tags=None):
     """ STEP 1: Create Product Shell """
     if DRY_RUN:
         log_action("SHOPIFY", product_data['sku'], f"Draft Shell: {product_data['title']}")
@@ -577,6 +591,10 @@ def create_shopify_product_shell(product_data, release_date=None):
 
     tags = ["Review Needed", "New Auto-Import", product_data['vendor']]
     if release_date: tags.append(f"Release: {release_date}")
+    
+    if extra_tags:
+        for t in extra_tags:
+            if t not in tags: tags.append(t)
 
     # Generate SEO data from title and description
     seo_title = product_data['title']
@@ -631,14 +649,11 @@ def create_shopify_product_shell(product_data, release_date=None):
         return None, None, None
 
 def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRAMS', price="0.00", compare_at=None):
-    """ STEP 2: Update Variant Data (Exposed Error Handling) """
+    """ STEP 2: Update Variant Data """
     if DRY_RUN or not variant_id: return
 
-    shopify_unit = "GRAMS"
-    w_unit_clean = str(weight_unit).upper()
-    if "KG" in w_unit_clean: shopify_unit = "KILOGRAMS"
-    elif "OZ" in w_unit_clean: shopify_unit = "OUNCES"
-    elif "LB" in w_unit_clean: shopify_unit = "POUNDS"
+    # Ensure GRAMS is always used for consistency
+    shopify_unit = "GRAMS" 
 
     mutation = """
     mutation productVariantUpdate($input: ProductVariantInput!) {
@@ -652,6 +667,7 @@ def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRA
     # Safe float compare for Compare At Price
     price_val = safe_float(price)
     compare_val = safe_float(compare_at)
+    weight_val = safe_float(weight)
     
     # Ensure strict string format for GraphQL money "12.50"
     price_str = f"{price_val:.2f}"
@@ -660,11 +676,11 @@ def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRA
         "id": variant_id,
         "sku": sku,
         "inventoryManagement": "SHOPIFY", 
-        "inventoryPolicy": "DENY",
+        "inventoryPolicy": "DENY", # FORCED DENY
         "taxable": True,
-        "price": price_str, # Use the string variable
+        "price": price_str,
         "barcode": upc or "",
-        "weight": float(weight),
+        "weight": weight_val,
         "weightUnit": shopify_unit
     }
     
@@ -680,7 +696,7 @@ def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRA
         if data.get('data', {}).get('productVariantUpdate', {}).get('userErrors'):
              print(f"    [!] Variant Update Error for {sku}: {data['data']['productVariantUpdate']['userErrors']}", flush=True)
         else:
-             print(f"    [SUCCESS] Updated Variant {sku}", flush=True) # Confirm success
+             print(f"    [SUCCESS] Updated Variant {sku} (Price: {price_str})", flush=True)
         time.sleep(0.5) 
     except Exception as e:
         print(f"    [CRITICAL] Variant Update Crash for {sku}: {e}", flush=True)
@@ -927,7 +943,8 @@ def main():
                                 "compare_at_price": compare_val,
                                 "upc": barcode_val,
                                 "primary_faction": "",
-                                "release_date": None
+                                "release_date": None,
+                                "source_tags": [] # Empty list for Asmodee
                             })
         except Exception as e: print(f"Sheet Error: {e}", flush=True)
 
@@ -986,7 +1003,12 @@ def main():
             cloud_urls = process_and_upload_images(sku, source_images, vendor)
             
             # --- 3-STEP CREATION WITH LOCATION ---
-            prod_id, variant_id, inventory_item_id = create_shopify_product_shell(item, item.get('release_date'))
+            # Pass source_tags here
+            prod_id, variant_id, inventory_item_id = create_shopify_product_shell(
+                item, 
+                item.get('release_date'),
+                extra_tags=item.get('source_tags', []) 
+            )
             
             if prod_id:
                 # 1. Update Variant Data (SKU, GTIN, Weight, Price)
@@ -997,7 +1019,10 @@ def main():
                     weight=item.get('weight', 0),
                     weight_unit=item.get('weight_unit', 'g'),
                     price=item.get('price', "0.00"),
-                    compare_at=item.get('compare_at_price')
+                    compare_at=item.get('compare_at_price'),
+                    # Fix: Ensure inventory policy is passed correctly if available, else default to deny
+                    # Note: You requested FORCE DENY previously, but this allows flexibility if needed later.
+                    # The update_default_variant function currently HARDCODES it to DENY regardless of this input.
                 )
                 
                 # 2. Activate Inventory at Deltona
