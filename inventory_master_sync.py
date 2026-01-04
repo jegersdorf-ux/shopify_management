@@ -698,12 +698,13 @@ def update_product_metafields(product_id, game_name, faction=""):
     }
     """
     
+    # --- FIX: Game Name as LIST, Faction as SINGLE ---
     fields = [
         {
             "ownerId": product_id,
             "namespace": "custom",
             "key": "game_name",
-            "type": "list.single_line_text_field",
+            "type": "list.single_line_text_field", # LIST TYPE
             "value": json.dumps([game_name])
         }
     ]
@@ -713,8 +714,8 @@ def update_product_metafields(product_id, game_name, faction=""):
             "ownerId": product_id,
             "namespace": "custom",
             "key": "primary_faction",
-            "type": "list.single_line_text_field",
-            "value": json.dumps([faction])
+            "type": "single_line_text_field", # SINGLE TYPE
+            "value": faction
         })
     
     url = get_shopify_url() 
