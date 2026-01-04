@@ -20,7 +20,7 @@ from googleapiclient.discovery import build
 # --- CONFIGURATION & SECRETS ---
 DRY_RUN = False        
 TEST_MODE = True       
-TEST_LIMIT = 10        # Will process until 20 SUCCESSFUL uploads are achieved
+TEST_LIMIT = 20        # Will process until 20 SUCCESSFUL uploads are achieved
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 REPO_NAME = os.getenv('REPO_NAME')
@@ -31,7 +31,7 @@ GOOGLE_CREDENTIALS_BASE64 = os.getenv('GOOGLE_CREDENTIALS_BASE64')
 
 SHOPIFY_STORE_URL = os.getenv('SHOPIFY_STORE_URL')
 SHOPIFY_ACCESS_TOKEN = os.getenv('SHOPIFY_ACCESS_TOKEN')
-SHOPIFY_API_VERSION = "2024-10" # Updated to a valid, supported version
+SHOPIFY_API_VERSION = "2026-01" # Updated to the newest 2026 version
 
 EMAIL_SENDER = os.getenv('EMAIL_SENDER')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
@@ -120,7 +120,7 @@ def walk_drive_folder(service, folder_id):
             items = results.get('files', [])
             for item in items:
                 if 'image/' in item['mimeType']:
-                    if item.get('webContentLink'): found_images.append(item['webContentLink'])
+                    if item.get('webContentLink'): found_images.append(item.get('webContentLink'))
                 elif item['mimeType'] == 'application/vnd.google-apps.folder':
                     found_images.extend(walk_drive_folder(service, item['id']))
             page_token = results.get('nextPageToken')
@@ -328,7 +328,7 @@ def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
         }
     }
     
-    url = get_shopify_url() # Use the robust URL generator
+    url = get_shopify_url() 
     if not url or not SHOPIFY_ACCESS_TOKEN:
         print("    [!] Missing Credentials")
         return None
@@ -339,13 +339,16 @@ def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
         r = requests.post(url, json={"query": mutation, "variables": variables}, headers=headers)
         if r.status_code == 200:
             data = r.json()
+            if 'errors' in data:
+                print(f"    [!] Shopify API Error: {json.dumps(data['errors'])}")
+                return None
             if data['data']['productCreate']['userErrors']:
                 print(f"    [!] Shopify UserError: {data['data']['productCreate']['userErrors']}")
                 return None
             print(f"    [SUCCESS] Created Draft: {data['data']['productCreate']['product']['id']}")
             return data['data']['productCreate']['product']['id']
         else:
-            print(f"    [!] Shopify API Error {r.status_code}: {r.text}")
+            print(f"    [!] Shopify API Status {r.status_code}: {r.text}")
             return None
     except Exception as e:
         print(f"    [!] Connect Error: {e}")
