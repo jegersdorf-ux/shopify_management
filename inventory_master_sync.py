@@ -208,10 +208,9 @@ def determine_faction(game_name, source_tags, source_url=""):
     return "" 
 
 def clean_html_for_seo(html_content):
-    """Simple stripper for SEO Description"""
     if not html_content: return ""
     clean = re.sub('<[^<]+?>', '', html_content)
-    return clean[:300] # Limit length
+    return clean[:300] 
 
 # ==========================================
 #           CATALOG DISCOVERY
@@ -704,8 +703,8 @@ def update_product_metafields(product_id, game_name, faction=""):
             "ownerId": product_id,
             "namespace": "custom",
             "key": "game_name",
-            "type": "single_line_text_field",
-            "value": game_name
+            "type": "list.single_line_text_field",
+            "value": json.dumps([game_name])
         }
     ]
     
@@ -714,8 +713,8 @@ def update_product_metafields(product_id, game_name, faction=""):
             "ownerId": product_id,
             "namespace": "custom",
             "key": "primary_faction",
-            "type": "single_line_text_field",
-            "value": faction
+            "type": "list.single_line_text_field",
+            "value": json.dumps([faction])
         })
     
     url = get_shopify_url() 
@@ -926,10 +925,11 @@ def main():
                 continue
             
             # --- ASMODEE-ONLY BLOCK ---
-            if vendor == "Asmodee" and not source_images:
-                print(f"    [SKIP] Asmodee Item {sku} has no images. Skipping.", flush=True)
-                skips_count += 1
-                continue
+            if not source_images:
+                if vendor == "Asmodee":
+                    print(f"    [SKIP] Asmodee Item {sku} has no images. Skipping.", flush=True)
+                    skips_count += 1
+                    continue
 
             print(f"   > Uploading {sku}...", flush=True)
             cloud_urls = process_and_upload_images(sku, source_images, vendor)
