@@ -11,13 +11,10 @@ import io
 import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from github import Github
+from github import Github, Auth  # <--- Updated import
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- CONFIGURATION & SECRETS ---
-# !!! SAFETY SWITCH !!!
-# Set to True to test without changing Shopify/Cloudinary/Inventory.
-# Set to False when ready to go live.
 DRY_RUN = True 
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
@@ -36,7 +33,7 @@ EMAIL_RECEIVER = os.getenv('EMAIL_RECEIVER')
 
 # Files & Folders
 JSON_FILE_PATH = "product_inventory.json"
-REPORT_FILE_PATH = "dry_run_report.md" # New report file
+REPORT_FILE_PATH = "dry_run_report.md" 
 PROMPTS_FILE_PATH = "gemini_prompts.txt"
 CLOUDINARY_ROOT_FOLDER = "Extra-Turn-Games"
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1OFpCuFatmI0YAfVGRcqkfLJbfa-2NL9gReQFqkORhtw/edit"
@@ -53,7 +50,6 @@ if not DRY_RUN:
 dry_run_logs = []
 
 def log_action(action_type, sku, details):
-    """Adds an event to the dry run report."""
     entry = f"| {action_type} | **{sku}** | {details} |"
     print(f"[DRY RUN] {entry}")
     dry_run_logs.append(entry)
@@ -62,7 +58,7 @@ def log_action(action_type, sku, details):
 
 def send_email(subject, body_html):
     if DRY_RUN:
-        log_action("EMAIL", "N/A", f"Would send email: '{subject}' to {EMAIL_RECEIVER}")
+        log_action("EMAIL", "N/A", f"Would send email: '{subject}'")
         return
 
     if not EMAIL_SENDER or not EMAIL_PASSWORD:
@@ -85,18 +81,27 @@ def send_email(subject, body_html):
 
 def get_google_sheet_client():
     """Auth for Google Sheets."""
-    json_creds = base64.b64decode(GOOGLE_CREDENTIALS_BASE64).decode('utf-8')
-    creds_dict = json.loads(json_creds)
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    return gspread.authorize(creds)
+    if not GOOGLE_CREDENTIALS_BASE64:
+        raise ValueError("CRITICAL ERROR: Secret 'GOOGLE_CREDENTIALS_BASE64' is missing or empty.")
+
+    try:
+        json_creds = base64.b64decode(GOOGLE_CREDENTIALS_BASE64).decode('utf-8')
+        # Check if decode result is empty
+        if not json_creds:
+             raise ValueError("Decoded credentials are empty.")
+             
+        creds_dict = json.loads(json_creds)
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        return gspread.authorize(creds)
+    except Exception as e:
+        print(f"   !!! Google Auth Failed: {e}")
+        raise e
 
 def extract_pdf_text(pdf_url):
-    """Downloads and extracts text from Sell Sheet PDF."""
     if not pdf_url or "http" not in pdf_url: return ""
     
     if DRY_RUN:
-        # Don't download large files in dry run, just verify link exists
         return "DRY RUN: PDF content would be extracted here."
 
     try:
@@ -115,7 +120,7 @@ def upload_image_to_cloudinary(image_url, sku):
     
     if DRY_RUN:
         log_action("CLOUDINARY", sku, f"Would upload image from {image_url[:30]}...")
-        return "https://res.cloudinary.com/demo/image/upload/sample.jpg" # Dummy URL
+        return "https://res.cloudinary.com/demo/image/upload/sample.jpg"
     
     clean_sku = "".join(x for x in sku if x.isalnum() or x in "-_")
     public_id = f"{CLOUDINARY_ROOT_FOLDER}/{clean_sku}"
@@ -135,7 +140,6 @@ def upload_image_to_cloudinary(image_url, sku):
         return None
 
 def shopify_graphql(query, variables=None):
-    """Helper for Shopify Admin API."""
     if not SHOPIFY_STORE_URL or not SHOPIFY_ACCESS_TOKEN:
         return None
         
@@ -153,7 +157,7 @@ def shopify_graphql(query, variables=None):
 def create_shopify_draft(product_data, image_url):
     if DRY_RUN:
         log_action("SHOPIFY", product_data['sku'], f"Would create DRAFT: {product_data['title']}")
-        return "gid://shopify/Product/123456789" # Dummy ID
+        return "gid://shopify/Product/123456789"
 
     mutation = """
     mutation productCreate($input: ProductInput!) {
@@ -184,8 +188,6 @@ def create_shopify_draft(product_data, image_url):
     return None
 
 def check_shopify_status(sku):
-    """Checks if SKU is ACTIVE on Shopify."""
-    # We DO want to check status even in dry run to find conflicts
     query = """
     query($query: String!) {
       products(first: 1, query: $query) {
@@ -221,8 +223,9 @@ def add_tag(shopify_id, tag, sku):
 def main():
     print(f"--- STARTING SCRIPT (DRY RUN MODE: {DRY_RUN}) ---")
     
-    # 1. GitHub Connection & Load State
-    g = Github(GITHUB_TOKEN)
+    # 1. GitHub Connection (Updated for Auth)
+    auth = Auth.Token(GITHUB_TOKEN)
+    g = Github(auth=auth)
     repo = g.get_repo(REPO_NAME)
     
     try:
@@ -253,24 +256,17 @@ def main():
         pdf_source = row.get('Sell Sheet', '')
         status_text = str(row.get('Status', 'Available')).lower()
 
-        # Is it available in the source?
         is_available = "out" not in status_text and "unavailable" not in status_text
 
         if not sku: continue
 
-        # --- SCENARIO A: NEW ITEM ---
         if sku not in inventory_map:
-            # Rule: If new AND unavailable -> Skip completely
             if not is_available:
                 continue
 
-            # 1. Upload Image (Simulated)
             c_url = upload_image_to_cloudinary(image_source, sku)
-            
-            # 2. Create Shopify Draft (Simulated)
             shopify_id = create_shopify_draft({"sku": sku, "title": title}, c_url)
             
-            # 3. Add to Temp Inventory List (For Email Logic)
             new_entry = {
                 "sku": sku,
                 "title": title,
@@ -279,69 +275,55 @@ def main():
                 "shopify_status": "DRAFT",
                 "specs_extracted": False
             }
-            # Note: We don't save this to inventory_map in DRY RUN to avoid corrupting the file
             new_items_added.append(new_entry)
             updates_made = True
 
-        # --- SCENARIO B: EXISTING ITEM ---
         else:
             product = inventory_map[sku]
-            
-            # Rule: If source says unavailable, check if we need to alert
             if not is_available:
-                # Check Shopify status
                 shopify_data = check_shopify_status(sku)
-                
                 if shopify_data and shopify_data['status'] == 'ACTIVE':
-                    # ALERT: Active on site but Dead in source
                     if "Review Needed" not in shopify_data['tags']:
                         add_tag(shopify_data['id'], "Review Needed", sku)
-                    
                     active_conflicts.append(product)
 
-        # --- PROCESS PDF ---
-        # If new item (even in dry run) or existing item needs specs
-        if (sku in inventory_map and not inventory_map[sku].get('specs_extracted')) or (sku not in inventory_map and is_available):
-             if pdf_source and "http" in pdf_source:
-                raw_text = extract_pdf_text(pdf_source)
-                if raw_text:
-                    if DRY_RUN:
-                        log_action("PDF", sku, "Would extract text for Gemini Prompt")
-                    else:
-                        prompt = (
-                            f"--- PROMPT FOR SKU: {sku} ({title}) ---\n"
-                            f"CONTEXT: Extract specs.\n"
-                            f"RAW TEXT:\n{raw_text[:2500]}...\n" 
-                            f"--------------------------------------------------\n"
-                        )
-                        prompts_to_generate.append(prompt)
-                        if sku in inventory_map:
-                            inventory_map[sku]['specs_extracted'] = "pending"
-                        updates_made = True
+        # Process PDF (Dry Run Safe)
+        needs_specs = (sku in inventory_map and not inventory_map[sku].get('specs_extracted')) or (sku not in inventory_map and is_available)
+        
+        if needs_specs and pdf_source and "http" in pdf_source:
+             raw_text = extract_pdf_text(pdf_source)
+             if raw_text:
+                if DRY_RUN:
+                    log_action("PDF", sku, "Would extract text for Gemini Prompt")
+                else:
+                    prompt = (
+                        f"--- PROMPT FOR SKU: {sku} ({title}) ---\n"
+                        f"CONTEXT: Extract specs.\n"
+                        f"RAW TEXT:\n{raw_text[:2500]}...\n" 
+                        f"--------------------------------------------------\n"
+                    )
+                    prompts_to_generate.append(prompt)
+                    if sku in inventory_map:
+                        inventory_map[sku]['specs_extracted'] = "pending"
+                    updates_made = True
 
-    # --- EMAIL NOTIFICATIONS (SIMULATED) ---
-
+    # --- EMAIL & REPORTING ---
     if new_items_added:
         send_email(f"Import: {len(new_items_added)} New Items", "Body Omitted in Dry Run")
 
     if active_conflicts:
         send_email(f"ALERT: {len(active_conflicts)} Inventory Conflicts", "Body Omitted in Dry Run")
 
-    # --- REPORT GENERATION ---
     if DRY_RUN:
         print("Generating Dry Run Report...")
-        report_content = "# Dry Run Report\n\n"
-        report_content += "| Action | SKU | Details |\n"
-        report_content += "|---|---|---|\n"
+        report_content = "# Dry Run Report\n\n| Action | SKU | Details |\n|---|---|---|\n"
         for log in dry_run_logs:
             report_content += f"{log}\n"
         
         if not dry_run_logs:
             report_content += "\n**No actions would be taken.**\n"
 
-        # Save Report to GitHub
         try:
-            repo.get_contents(REPORT_FILE_PATH)
             contents = repo.get_contents(REPORT_FILE_PATH)
             repo.update_file(REPORT_FILE_PATH, "Dry Run Report", report_content, contents.sha)
         except:
@@ -349,10 +331,8 @@ def main():
             
         print("Dry Run Complete. Check dry_run_report.md in your repo.")
         
-    # --- REAL SAVE (SKIPPED IN DRY RUN) ---
     elif updates_made:
         print("Saving updates to GitHub...")
-        # Save JSON
         updated_list = list(inventory_map.values())
         json_content = json.dumps(updated_list, indent=2)
         try:
@@ -361,7 +341,6 @@ def main():
         except:
             repo.create_file(JSON_FILE_PATH, "Inventory Sync", json_content)
 
-        # Save Prompts
         if prompts_to_generate:
             full_prompt_text = "\n".join(prompts_to_generate)
             try:
