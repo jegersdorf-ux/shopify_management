@@ -26,7 +26,7 @@ from googleapiclient.discovery import build
 DRY_RUN = False        
 TEST_MODE = False       
 TEST_LIMIT = 20        
-RESET_IGNORED_ITEMS = False
+RESET_IGNORED_ITEMS = True
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 REPO_NAME = os.getenv('REPO_NAME')
@@ -54,7 +54,7 @@ SHEET_URL = "https://docs.google.com/spreadsheets/d/1OFpCuFatmI0YAfVGRcqkfLJbfa-
 ASMODEE_PREFIXES = [
     "CHX", "ESS", "FF", "G2", "GG49", "GG3", "GG2", "GGS2", "NEM", 
     "SWA", "SWC", "SWO", "SWD", "SWF", "SWL", "SWU", "USWA", 
-    "CPE", "CP", "SWP", "SWQ"
+    "CPE", "CP", "SWP", "SWQ", "CA"
 ]
 
 # --- CLOUDINARY SETUP ---
@@ -230,6 +230,34 @@ def get_visible_sheet_values(sheet_url):
     except: return []
 
 # ==========================================
+#           GAME NAME & TITLE HELPERS
+# ==========================================
+
+def determine_game_name_asmodee(sku):
+    """Derives Game Name from Asmodee SKU prefixes"""
+    s = str(sku).upper()
+    if s.startswith("SWP"): return "Star Wars: Shatterpoint"
+    if s.startswith("SWL"): return "Star Wars: Legion"
+    if s.startswith("SWQ"): return "Star Wars: Legion"
+    if s.startswith("CP"): return "Marvel: Crisis Protocol"
+    if s.startswith("CA"): return "Marvel: Crisis Protocol"
+    return "Asmodee" # Fallback
+
+def format_title_prefix(title, vendor):
+    """Ensures titles start with the correct game/vendor prefix"""
+    clean_title = str(title).strip()
+    
+    if "Moonstone" in vendor:
+        if not clean_title.startswith("Moonstone:"):
+            return f"Moonstone: {clean_title}"
+            
+    elif "Warsenal" in vendor or "Corvus" in vendor:
+        if not clean_title.startswith("Infinity:"):
+            return f"Infinity: {clean_title}"
+            
+    return clean_title
+
+# ==========================================
 #           CATALOG DISCOVERY
 # ==========================================
 
@@ -238,6 +266,10 @@ def discover_shopify_catalog(store_url, vendor_name):
     base_url = f"{store_url}/products.json"
     page = 1
     found_items = []
+    
+    # Pre-calculate Game Name for non-Asmodee
+    game_name = "Moonstone" if "Moonstone" in vendor_name else "Infinity"
+    
     while True:
         try:
             if page % 5 == 0: print(f"    ...scanning page {page}...", flush=True)
@@ -255,31 +287,28 @@ def discover_shopify_catalog(store_url, vendor_name):
                 
                 # --- 1-1 DATA MAPPING ---
                 images = [img['src'] for img in p.get('images', [])]
-                
-                # Use source vendor if available, else fallback to arg
                 source_vendor = p.get('vendor', vendor_name)
                 
-                # PRICE LOGIC: Prefer 'compare_at_price' (MSRP) over 'price' (Discounted)
+                # PRICE LOGIC
                 base_price = variant.get('compare_at_price')
                 sell_price = variant.get('price', '0.00')
-                
-                if base_price and float(base_price) > 0:
-                    final_price = base_price
-                else:
-                    final_price = sell_price
+                final_price = base_price if (base_price and float(base_price) > 0) else sell_price
+
+                # Apply Title Prefix Logic
+                final_title = format_title_prefix(p.get('title', ''), vendor_name)
 
                 found_items.append({
                     "sku": sku, 
-                    "title": p.get('title', ''), 
+                    "title": final_title, 
                     "vendor": source_vendor, 
-                    "product_type": p.get('product_type', ''),
+                    "product_type": game_name, # Map to Game Name
                     "description": p.get('body_html', ''), 
                     "images_source": images, 
                     "pdf": "", 
                     "upc": variant.get('barcode', ''),
                     "weight": variant.get('weight', 0),
                     "weight_unit": variant.get('weight_unit', 'g'),
-                    "source_price": final_price, # Using calculated base price
+                    "source_price": final_price, 
                     "active_status": variant.get('available', True), 
                     "release_date": None
                 })
@@ -301,17 +330,21 @@ def discover_corvus_catalog():
             print(f"    > Found {len(p_urls)} potential Corvus items.", flush=True)
             for url in p_urls:
                 slug = url.split('/')[-1]
+                raw_title = slug.replace('-', ' ').title()
+                
+                # Apply Infinity Prefix
+                final_title = f"Infinity: {raw_title}"
+                
                 found_items.append({
                     "sku": f"CB_LOOKUP_{slug}", 
-                    "title": slug.replace('-', ' ').title(),
+                    "title": final_title,
                     "vendor": "Corvus Belli", 
+                    "product_type": "Infinity", # Game Name
                     "images_source": [], 
                     "pdf": "", 
                     "url": url,
                     "is_skeleton": True,
-                    # Defaults for skeletons:
                     "description": "",
-                    "product_type": "",
                     "weight": 0,
                     "weight_unit": "g"
                 })
@@ -348,9 +381,10 @@ def resolve_corvus_skeleton(item):
         if sku:
             item['sku'] = sku
             h1 = soup.find('h1')
-            if h1: item['title'] = h1.get_text().strip()
+            if h1: 
+                raw_title = h1.get_text().strip()
+                item['title'] = format_title_prefix(raw_title, "Corvus") # Re-apply prefix if title changes
             
-            # --- CORVUS DESCRIPTION EXTRACTION ---
             desc_tag = soup.select_one('.product-description, .description')
             if desc_tag:
                 item['description'] = str(desc_tag)
@@ -391,7 +425,6 @@ def send_email(subject, body_html):
     except: pass
 
 def determine_cloudinary_folder(vendor):
-    """Routing logic for image folders based on Vendor"""
     v_lower = str(vendor).lower()
     if "moonstone" in v_lower:
         return f"{CLOUDINARY_ROOT_FOLDER}/Moonstone"
@@ -466,14 +499,12 @@ def create_shopify_product_shell(product_data, release_date=None):
     tags = ["Review Needed", "New Auto-Import", product_data['vendor']]
     if release_date: tags.append(f"Release: {release_date}")
 
-    # Map rich data fields
     gql_input = {
         "title": product_data['title'],
         "status": "DRAFT",
         "vendor": product_data['vendor'],
-        "productType": product_data.get('product_type', ''),
+        "productType": product_data.get('product_type', ''), # Game Name Mapped Here
         "tags": tags,
-        # Use full HTML description if available, fallback to release date note
         "descriptionHtml": product_data.get('description') or (f"<p>Release: {release_date}</p>" if release_date else "")
     }
 
@@ -514,7 +545,6 @@ def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRA
     """ STEP 2: Update Variant with Weight/Price """
     if DRY_RUN or not variant_id: return
 
-    # Normalize Weight Unit for Shopify (GRAMS, KILOGRAMS, OUNCES, POUNDS)
     shopify_unit = "GRAMS"
     w_unit_clean = str(weight_unit).upper()
     if "KG" in w_unit_clean: shopify_unit = "KILOGRAMS"
@@ -535,7 +565,7 @@ def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRA
         "sku": sku,
         "inventoryManagement": "SHOPIFY", 
         "inventoryPolicy": "DENY",
-        "price": price if float(price) > 0 else "0.00", # Use source price if valid
+        "price": price if float(price) > 0 else "0.00", 
         "barcode": upc or "",
         "weight": float(weight),
         "weightUnit": shopify_unit
@@ -671,16 +701,19 @@ def main():
                     if any(sku.startswith(p) for p in ASMODEE_PREFIXES):
                         raw_link = str(row[idx_img]) if idx_img != -1 else ""
                         resolved_images = get_asmodee_image_links(raw_link)
+                        
+                        # DERIVE GAME NAME FROM SKU FOR ASMODEE
+                        game_name = determine_game_name_asmodee(sku)
+                        
                         asmodee_items.append({
                             "sku": sku, 
                             "title": row[idx_title], 
                             "vendor": "Asmodee",
+                            "product_type": game_name, # Mapped Game Name
                             "images_source": resolved_images,
                             "pdf": row[idx_pdf], 
                             "active_status": None,
-                            # Default Values for Sheet Items
                             "description": "",
-                            "product_type": "",
                             "weight": 0,
                             "weight_unit": "g",
                             "source_price": "0.00"
@@ -754,7 +787,6 @@ def main():
                     continue
 
             print(f"   > Uploading {sku}...", flush=True)
-            # --- PASS VENDOR TO UPLOAD FUNCTION ---
             cloud_urls = process_and_upload_images(sku, source_images, vendor)
             
             # --- 3-STEP CREATION ---
@@ -805,7 +837,6 @@ def main():
 
             if (not stored_images) and source_images:
                 print(f"   > Backfilling images for {sku}...", flush=True)
-                # --- PASS VENDOR TO UPLOAD FUNCTION ---
                 cloud_urls = process_and_upload_images(sku, source_images, vendor)
                 if cloud_urls:
                     existing_product['cloudinary_images'] = cloud_urls
