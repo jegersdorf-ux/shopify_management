@@ -1753,5 +1753,305 @@
     "release_date": null,
     "upc": "",
     "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-SM050",
+    "title": "Moonstone: Kavanagh the Jongler",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559142/Extra-Turn-Games/Moonstone/MS-SM050.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559143/Extra-Turn-Games/Moonstone/MS-SM050_1.png"
+    ],
+    "shopify_id": "gid://shopify/Product/9215158747350",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-SM049",
+    "title": "Moonstone: Brother Daniel",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559147/Extra-Turn-Games/Moonstone/MS-SM049.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559148/Extra-Turn-Games/Moonstone/MS-SM049_1.png"
+    ],
+    "shopify_id": "gid://shopify/Product/9215158780118",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-SM048",
+    "title": "Moonstone: Stryga Anya",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559152/Extra-Turn-Games/Moonstone/MS-SM048.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559154/Extra-Turn-Games/Moonstone/MS-SM048_1.png"
+    ],
+    "shopify_id": "gid://shopify/Product/9215158812886",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-SM047",
+    "title": "Moonstone: Anya Bartol",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559160/Extra-Turn-Games/Moonstone/MS-SM047.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559161/Extra-Turn-Games/Moonstone/MS-SM047_1.png"
+    ],
+    "shopify_id": "gid://shopify/Product/9215158845654",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-SM044",
+    "title": "Moonstone: Danica, Dusk Witch",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559165/Extra-Turn-Games/Moonstone/MS-SM044.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559166/Extra-Turn-Games/Moonstone/MS-SM044_1.jpg"
+    ],
+    "shopify_id": "gid://shopify/Product/9215158911190",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-SM043",
+    "title": "Moonstone: Antonia, Noon Witch",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559170/Extra-Turn-Games/Moonstone/MS-SM043.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559170/Extra-Turn-Games/Moonstone/MS-SM043_1.jpg"
+    ],
+    "shopify_id": "gid://shopify/Product/9215158943958",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-SM041",
+    "title": "Moonstone: Chubs",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559175/Extra-Turn-Games/Moonstone/MS-SM041.png",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559175/Extra-Turn-Games/Moonstone/MS-SM041_1.jpg"
+    ],
+    "shopify_id": "gid://shopify/Product/9215159009494",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-SM040",
+    "title": "Moonstone: Gloom",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559179/Extra-Turn-Games/Moonstone/MS-SM040.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559179/Extra-Turn-Games/Moonstone/MS-SM040_1.jpg"
+    ],
+    "shopify_id": "gid://shopify/Product/9215159042262",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-TB017",
+    "title": "Moonstone: The Cursed",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559183/Extra-Turn-Games/Moonstone/MS-TB017.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559184/Extra-Turn-Games/Moonstone/MS-TB017_1.png",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559184/Extra-Turn-Games/Moonstone/MS-TB017_2.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559185/Extra-Turn-Games/Moonstone/MS-TB017_3.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559185/Extra-Turn-Games/Moonstone/MS-TB017_4.png",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559186/Extra-Turn-Games/Moonstone/MS-TB017_5.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559186/Extra-Turn-Games/Moonstone/MS-TB017_6.png",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559187/Extra-Turn-Games/Moonstone/MS-TB017_7.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559187/Extra-Turn-Games/Moonstone/MS-TB017_8.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559188/Extra-Turn-Games/Moonstone/MS-TB017_9.png"
+    ],
+    "shopify_id": "gid://shopify/Product/9215159075030",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-BG011",
+    "title": "Moonstone: Loubard",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559192/Extra-Turn-Games/Moonstone/MS-BG011.png",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559193/Extra-Turn-Games/Moonstone/MS-BG011_1.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559194/Extra-Turn-Games/Moonstone/MS-BG011_2.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559195/Extra-Turn-Games/Moonstone/MS-BG011_3.png"
+    ],
+    "shopify_id": "gid://shopify/Product/9215159140566",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-SM039",
+    "title": "Moonstone: Wendigo",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559200/Extra-Turn-Games/Moonstone/MS-SM039.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559200/Extra-Turn-Games/Moonstone/MS-SM039_1.jpg"
+    ],
+    "shopify_id": "gid://shopify/Product/9215159206102",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-BG007",
+    "title": "Moonstone: Ribald the Troll",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559204/Extra-Turn-Games/Moonstone/MS-BG007.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559205/Extra-Turn-Games/Moonstone/MS-BG007_1.png",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559205/Extra-Turn-Games/Moonstone/MS-BG007_2.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559206/Extra-Turn-Games/Moonstone/MS-BG007_3.jpg"
+    ],
+    "shopify_id": "gid://shopify/Product/9215159238870",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-TB015",
+    "title": "Moonstone: Wild Things",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559210/Extra-Turn-Games/Moonstone/MS-TB015.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559210/Extra-Turn-Games/Moonstone/MS-TB015_1.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559211/Extra-Turn-Games/Moonstone/MS-TB015_2.png",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559212/Extra-Turn-Games/Moonstone/MS-TB015_3.png",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559212/Extra-Turn-Games/Moonstone/MS-TB015_4.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559213/Extra-Turn-Games/Moonstone/MS-TB015_5.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559213/Extra-Turn-Games/Moonstone/MS-TB015_6.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559214/Extra-Turn-Games/Moonstone/MS-TB015_7.jpg"
+    ],
+    "shopify_id": "gid://shopify/Product/9215159271638",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-BG009",
+    "title": "Moonstone: Boris the Bunny Summoner",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559218/Extra-Turn-Games/Moonstone/MS-BG009.png",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559219/Extra-Turn-Games/Moonstone/MS-BG009_1.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559219/Extra-Turn-Games/Moonstone/MS-BG009_2.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559220/Extra-Turn-Games/Moonstone/MS-BG009_3.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559220/Extra-Turn-Games/Moonstone/MS-BG009_4.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559221/Extra-Turn-Games/Moonstone/MS-BG009_5.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559221/Extra-Turn-Games/Moonstone/MS-BG009_6.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559222/Extra-Turn-Games/Moonstone/MS-BG009_7.jpg"
+    ],
+    "shopify_id": "gid://shopify/Product/9215159369942",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-BG008",
+    "title": "Moonstone: Jackalope",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559226/Extra-Turn-Games/Moonstone/MS-BG008.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559227/Extra-Turn-Games/Moonstone/MS-BG008_1.png",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559227/Extra-Turn-Games/Moonstone/MS-BG008_2.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559228/Extra-Turn-Games/Moonstone/MS-BG008_3.jpg"
+    ],
+    "shopify_id": "gid://shopify/Product/9215159435478",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-TB014",
+    "title": "Moonstone: A Witch In Time",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559232/Extra-Turn-Games/Moonstone/MS-TB014.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559233/Extra-Turn-Games/Moonstone/MS-TB014_1.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559235/Extra-Turn-Games/Moonstone/MS-TB014_2.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559236/Extra-Turn-Games/Moonstone/MS-TB014_3.png",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559236/Extra-Turn-Games/Moonstone/MS-TB014_4.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559237/Extra-Turn-Games/Moonstone/MS-TB014_5.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559238/Extra-Turn-Games/Moonstone/MS-TB014_6.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559238/Extra-Turn-Games/Moonstone/MS-TB014_7.jpg"
+    ],
+    "shopify_id": "gid://shopify/Product/9215159468246",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-TB016",
+    "title": "Moonstone: The End is Nigh",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559242/Extra-Turn-Games/Moonstone/MS-TB016.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559243/Extra-Turn-Games/Moonstone/MS-TB016_1.png",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559244/Extra-Turn-Games/Moonstone/MS-TB016_2.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559244/Extra-Turn-Games/Moonstone/MS-TB016_3.png",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559245/Extra-Turn-Games/Moonstone/MS-TB016_4.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559246/Extra-Turn-Games/Moonstone/MS-TB016_5.png",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559246/Extra-Turn-Games/Moonstone/MS-TB016_6.png",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559247/Extra-Turn-Games/Moonstone/MS-TB016_7.jpg"
+    ],
+    "shopify_id": "gid://shopify/Product/9215159566550",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-BG010",
+    "title": "Moonstone: Dim & Dimmer",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559251/Extra-Turn-Games/Moonstone/MS-BG010.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559252/Extra-Turn-Games/Moonstone/MS-BG010_1.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559252/Extra-Turn-Games/Moonstone/MS-BG010_2.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559253/Extra-Turn-Games/Moonstone/MS-BG010_3.png"
+    ],
+    "shopify_id": "gid://shopify/Product/9215159599318",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-SM038",
+    "title": "Moonstone: Crusty Balboa",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559257/Extra-Turn-Games/Moonstone/MS-SM038.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559258/Extra-Turn-Games/Moonstone/MS-SM038_1.jpg"
+    ],
+    "shopify_id": "gid://shopify/Product/9215159632086",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
+  },
+  {
+    "sku": "MS-SM037",
+    "title": "Moonstone: Swiggarty Swooty",
+    "vendor": "Goblin King Games",
+    "cloudinary_images": [
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559262/Extra-Turn-Games/Moonstone/MS-SM037.jpg",
+      "https://res.cloudinary.com/dkwr3cjth/image/upload/v1767559263/Extra-Turn-Games/Moonstone/MS-SM037_1.jpg"
+    ],
+    "shopify_id": "gid://shopify/Product/9215159664854",
+    "release_date": null,
+    "upc": "",
+    "shopify_status": "DRAFT_CREATED"
   }
 ]
