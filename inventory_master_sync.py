@@ -18,9 +18,9 @@ from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 
 # --- CONFIGURATION & SECRETS ---
-DRY_RUN = False        # <--- LIVE MODE (Will create Drafts)
-TEST_MODE = True       # <--- SAFETY ON (Stops after 10 items)
-TEST_LIMIT = 10        # Number of items to process in Test Mode
+DRY_RUN = False        
+TEST_MODE = True       
+TEST_LIMIT = 20        # Increased limit to ensure we hit valid items
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 REPO_NAME = os.getenv('REPO_NAME')
@@ -131,7 +131,6 @@ def get_visible_sheet_values(sheet_url):
     match_id = re.search(r'/d/([a-zA-Z0-9-_]+)', sheet_url)
     if not match_id: return []
     spreadsheet_id = match_id.group(1)
-    
     target_gid = 0
     match_gid = re.search(r'[#&]gid=([0-9]+)', sheet_url)
     if match_gid: target_gid = int(match_gid.group(1))
@@ -146,18 +145,15 @@ def get_visible_sheet_values(sheet_url):
             if s['properties']['sheetId'] == target_gid:
                 target_sheet = s
                 break
-        
         if not target_sheet: return []
         print(f"    > Reading Tab: {target_sheet['properties']['title']} (GID: {target_gid})")
         
         rows = target_sheet['data'][0].get('rowData', [])
         visible_rows = []
-        
         for row in rows:
             user_hidden = row.get('rowMetadata', {}).get('hiddenByUser', False)
             filter_hidden = row.get('rowMetadata', {}).get('hiddenByFilter', False)
             if user_hidden or filter_hidden: continue 
-            
             values = []
             if 'values' in row:
                 for cell in row['values']:
@@ -319,7 +315,14 @@ def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
     if release_date: tags.append(f"Release: {release_date}")
     gql_images = [{"src": url} for url in image_urls]
 
-    mutation = """mutation productCreate($input: ProductInput!) { productCreate(input: $input) { product { id } } }"""
+    mutation = """
+    mutation productCreate($input: ProductInput!) {
+      productCreate(input: $input) {
+        product { id, title }
+        userErrors { field, message }
+      }
+    }
+    """
     variables = {
         "input": {
             "title": product_data['title'], "status": "DRAFT", "vendor": product_data['vendor'], "tags": tags,
@@ -328,12 +331,42 @@ def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
             "variants": [{"sku": product_data['sku'], "inventoryManagement": "SHOPIFY", "price": "0.00", "barcode": upc or ""}]
         }
     }
-    if not SHOPIFY_STORE_URL or not SHOPIFY_ACCESS_TOKEN: return None
+    
+    if not SHOPIFY_STORE_URL or not SHOPIFY_ACCESS_TOKEN: 
+        print("    [!] Missing Shopify Credentials.")
+        return None
+        
     url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-10/graphql.json"
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
-    r = requests.post(url, json={"query": mutation, "variables": variables}, headers=headers)
-    if r.status_code == 200 and 'data' in r.json(): return r.json()['data']['productCreate']['product']['id']
-    return None
+    
+    try:
+        r = requests.post(url, json={"query": mutation, "variables": variables}, headers=headers)
+        
+        if r.status_code == 200:
+            data = r.json()
+            if 'data' in data and data['data']['productCreate']:
+                result = data['data']['productCreate']
+                
+                # Check for User Errors (e.g. "SKU taken", "Title missing")
+                if result['userErrors']:
+                    print(f"    [!] Shopify UserError for {product_data['sku']}:")
+                    for err in result['userErrors']:
+                        print(f"        - {err['field']}: {err['message']}")
+                    return None
+                
+                if result['product']:
+                    print(f"    [SUCCESS] Created Draft: {result['product']['id']}")
+                    return result['product']['id']
+            
+            print(f"    [!] Unexpected Shopify Response: {data}")
+            return None
+        else:
+            print(f"    [!] Shopify API Error {r.status_code}: {r.text}")
+            return None
+
+    except Exception as e:
+        print(f"    [!] Shopify Connection Exception: {e}")
+        return None
 
 def check_shopify_status(sku):
     if not SHOPIFY_STORE_URL or not SHOPIFY_ACCESS_TOKEN: return None
@@ -379,11 +412,13 @@ def get_col_index(headers, name):
 def main():
     print(f"--- STARTING MASTER SYNC (TEST MODE: {TEST_MODE} | LIMIT: {TEST_LIMIT}) ---")
     
+    if not SHOPIFY_STORE_URL or not SHOPIFY_ACCESS_TOKEN:
+        print("CRITICAL WARNING: SHOPIFY_STORE_URL or SHOPIFY_ACCESS_TOKEN is missing.")
+    
     auth = Auth.Token(GITHUB_TOKEN)
     g = Github(auth=auth)
     repo = g.get_repo(REPO_NAME)
     
-    # 1. Load Inventory
     try:
         contents = repo.get_contents(JSON_FILE_PATH)
         inventory_data = json.loads(contents.decoded_content.decode())
@@ -395,33 +430,27 @@ def main():
     warsenal_items = discover_shopify_catalog("https://warsen.al", "Warsenal")
     corvus_skeletons = discover_corvus_catalog()
     
-    # 3. LOAD ASMODEE (VISIBLE ROWS ONLY)
     asmodee_items = []
     try:
         print("Connecting to Google Sheet (Filtering Hidden Rows)...")
         all_values = get_visible_sheet_values(SHEET_URL)
-        
         if all_values:
             h_idx = -1
             for i, row in enumerate(all_values[:5]):
                 if any('sku' in str(c).lower() for c in row): h_idx = i; break
-                
             if h_idx != -1:
                 headers = all_values[h_idx]
                 idx_sku = get_col_index(headers, "SKU")
                 idx_title = get_col_index(headers, "Title")
                 idx_img = get_col_index(headers, "POS Images")
                 idx_pdf = get_col_index(headers, "Sell Sheet")
-                
                 for row in all_values[h_idx+1:]:
                     if len(row) <= idx_sku: continue
                     sku = str(row[idx_sku]).strip()
                     if not sku: continue
                     if any(sku.startswith(p) for p in ASMODEE_PREFIXES):
-                        # Recursive Folder Scan for images
                         raw_link = str(row[idx_img]) if idx_img != -1 else ""
                         resolved_images = get_asmodee_image_links(raw_link)
-                        
                         asmodee_items.append({
                             "sku": sku, "title": row[idx_title], "vendor": "Asmodee",
                             "images_source": resolved_images,
@@ -429,7 +458,6 @@ def main():
                         })
     except Exception as e: print(f"Sheet Error: {e}")
 
-    # 4. MERGE
     all_rows = asmodee_items + moonstone_items + warsenal_items + corvus_skeletons
     print(f"Total Combined Queue: {len(all_rows)} items")
     
@@ -437,11 +465,9 @@ def main():
     new_items_added = []
     active_conflicts = []
     prompts_to_generate = []
-    
-    items_processed_count = 0 # Counter for Test Mode
+    items_processed_count = 0 
 
     for item in all_rows:
-        # TEST MODE CHECK
         if TEST_MODE and items_processed_count >= TEST_LIMIT:
             print(f"--- TEST LIMIT REACHED ({TEST_LIMIT} items). Stopping Loop. ---")
             break
@@ -468,7 +494,7 @@ def main():
         if not existing_product:
             if not is_avail: continue
             
-            # --- ASMODEE RULE: NO IMAGE = SKIP ---
+            # --- MODIFIED RULE: NO IMAGE = SKIP ONLY FOR ASMODEE ---
             if vendor == "Asmodee" and not source_images:
                 print(f"    [SKIP] Asmodee Item {sku} has no images. Recording but skipping Shopify.")
                 new_entry = {
@@ -481,7 +507,7 @@ def main():
                 updates_made = True
                 items_processed_count += 1
                 continue
-            # ------------------------------------
+            # -----------------------------------------------------
 
             cloud_urls = process_and_upload_images(sku, source_images)
             shopify_id = create_shopify_draft(item, cloud_urls, item.get('release_date'), item.get('upc'))
@@ -501,7 +527,7 @@ def main():
                 prompts_to_generate.append(prompt)
 
         else:
-            # We count an existing item as "Processed" only if we update it or check it
+            # Existing Item Check
             has_images = existing_product.get('cloudinary_images') or existing_product.get('cloudinary_url')
             if (not has_images) and source_images:
                 cloud_urls = process_and_upload_images(sku, source_images)
@@ -515,7 +541,7 @@ def main():
                     add_tag(s_data['id'], "Review Needed", sku)
                     active_conflicts.append(existing_product)
             
-            items_processed_count += 1 # Count checked items towards limit
+            items_processed_count += 1
 
     if new_items_added: send_email(f"Import: {len(new_items_added)} New", "Check Shopify.")
     if active_conflicts: send_email(f"ALERT: {len(active_conflicts)} Conflicts", "Check Shopify.")
