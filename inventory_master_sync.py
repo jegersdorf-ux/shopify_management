@@ -10,6 +10,11 @@ import pdfplumber
 import io
 import re
 import time
+import warnings
+
+# Suppress warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 from bs4 import BeautifulSoup
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -31,7 +36,7 @@ GOOGLE_CREDENTIALS_BASE64 = os.getenv('GOOGLE_CREDENTIALS_BASE64')
 
 SHOPIFY_STORE_URL = os.getenv('SHOPIFY_STORE_URL')
 SHOPIFY_ACCESS_TOKEN = os.getenv('SHOPIFY_ACCESS_TOKEN')
-SHOPIFY_API_VERSION = "2025-10" 
+SHOPIFY_API_VERSION = "2026-01" 
 
 EMAIL_SENDER = os.getenv('EMAIL_SENDER')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
@@ -51,12 +56,15 @@ ASMODEE_PREFIXES = [
     "CPE", "CP", "SWP", "SWQ"
 ]
 
-# Initialize Cloudinary
+# --- CLOUDINARY SETUP ---
+RATE_LIMIT_HIT = False 
+
 if not DRY_RUN:
     cloudinary.config(
         cloud_name=CLOUDINARY_CLOUD_NAME, 
         api_key=CLOUDINARY_API_KEY, 
-        api_secret=CLOUDINARY_API_SECRET
+        api_secret=CLOUDINARY_API_SECRET,
+        secure=True
     )
 
 dry_run_logs = []
@@ -67,35 +75,26 @@ def log_action(action_type, sku, details):
     dry_run_logs.append(entry)
 
 # ==========================================
-#           SHOPIFY HELPER (SMART FIX)
+#           SHOPIFY HELPER
 # ==========================================
 def get_shopify_url():
     if not SHOPIFY_STORE_URL: return None
-    
     clean_url = SHOPIFY_STORE_URL.strip()
-    
-    # CASE 1: User pasted the browser URL (e.g., admin.shopify.com/store/my-shop)
+    # Handle user pasting browser URL
     if "admin.shopify.com" in clean_url and "/store/" in clean_url:
         try:
-            # Extract the handle after /store/
             handle = clean_url.split("/store/")[1].split("/")[0]
-            print(f"    > Auto-Corrected URL: '{handle}.myshopify.com' (derived from admin link)")
             return f"https://{handle}.myshopify.com/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
-        except:
-            pass # Fallback to standard cleaning if split fails
-
-    # CASE 2: User pasted standard domain
+        except: pass
+    
     clean_url = clean_url.replace("https://", "").replace("http://", "")
-    if "/" in clean_url:
-        clean_url = clean_url.split("/")[0]
-        
+    if "/" in clean_url: clean_url = clean_url.split("/")[0]
     return f"https://{clean_url}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
 
 def test_shopify_connection():
     print("\n--- TESTING SHOPIFY CONNECTION ---")
     url = get_shopify_url()
     
-    # REVEAL DOMAIN FOR DEBUGGING
     domain_part = url.split("//")[1].split("/")[0] if url else "None"
     print(f"Target Domain: {domain_part}") 
     
@@ -103,8 +102,7 @@ def test_shopify_connection():
         print("\n[!!!] CRITICAL WARNING:")
         print(f"      You are using: '{domain_part}'")
         print("      This looks like the 'Human Login' page, not the API address.")
-        print("      If this fails, please update your GitHub Secret 'SHOPIFY_STORE_URL'.")
-        print("      It MUST be your internal handle, usually: 'extra-turn-games.myshopify.com'\n")
+        return False
 
     query = "{ shop { name, myshopifyDomain } }"
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
@@ -117,9 +115,10 @@ def test_shopify_connection():
             print("----------------------------------\n")
             return True
         elif r.status_code == 403:
-             print(f"FAIL: Status 403 (Forbidden).")
-             print("      This usually means you are using 'admin.shopify.com' instead of 'myshopify.com'.")
-             print("      Shopify's firewall is blocking the script.")
+             print(f"FAIL: Status 403 (Forbidden). Firewall blocking.")
+             return False
+        elif r.status_code == 401:
+             print(f"FAIL: Status 401 (Unauthorized). Invalid Token.")
              return False
         else:
             print(f"FAIL: Status {r.status_code}")
@@ -342,12 +341,20 @@ def send_email(subject, body_html):
     except: pass
 
 def process_and_upload_images(sku, source_urls):
+    global RATE_LIMIT_HIT # Allow access to the global flag
+    
     if not source_urls: return []
     uploaded_urls = []
     source_urls = list(set(source_urls)) # Dedup
 
     for i, url in enumerate(source_urls):
         if not url or "http" not in url: continue
+        
+        if RATE_LIMIT_HIT:
+            print(f"    [!] Skipping Cloudinary upload for {sku} (Rate Limit Active). Using source URL.")
+            uploaded_urls.append(url)
+            continue
+
         suffix = f"_{i}" if i > 0 else ""
         clean_sku = "".join(x for x in sku if x.isalnum() or x in "-_")
         public_id = f"{CLOUDINARY_ROOT_FOLDER}/{clean_sku}{suffix}"
@@ -356,10 +363,26 @@ def process_and_upload_images(sku, source_urls):
             log_action("CLOUDINARY", sku, f"Upload {public_id}")
             uploaded_urls.append("https://res.cloudinary.com/demo/image.jpg")
             continue
+            
         try:
-            res = cloudinary.uploader.upload(url, public_id=public_id, overwrite=True)
+            res = cloudinary.uploader.upload(
+                url, 
+                public_id=public_id, 
+                overwrite=True, 
+                unique_filename=False
+            )
             uploaded_urls.append(res['secure_url'])
-        except: pass
+            
+        except Exception as e:
+            error_msg = str(e)
+            if "420" in error_msg or "Rate Limit" in error_msg:
+                print(f"    [🛑] CLOUDINARY RATE LIMIT REACHED. Switching to pass-through mode.")
+                RATE_LIMIT_HIT = True
+                uploaded_urls.append(url) 
+            else:
+                print(f"    [!] Cloudinary Upload Failed for {sku}: {error_msg}")
+                pass
+            
     return uploaded_urls
 
 def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
@@ -369,17 +392,39 @@ def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
     
     tags = ["Review Needed", "New Auto-Import", product_data['vendor']]
     if release_date: tags.append(f"Release: {release_date}")
-    gql_images = [{"src": url} for url in image_urls]
+    
+    gql_media = []
+    for url in image_urls:
+        gql_media.append({
+            "originalSource": url,
+            "mediaContentType": "IMAGE"
+        })
 
-    mutation = """mutation productCreate($input: ProductInput!) { productCreate(input: $input) { product { id } userErrors { field, message } } }"""
-    variables = {
-        "input": {
-            "title": product_data['title'], "status": "DRAFT", "vendor": product_data['vendor'], "tags": tags,
-            "descriptionHtml": f"<p>Release: {release_date}</p>" if release_date else "",
-            "images": gql_images,
-            "variants": [{"sku": product_data['sku'], "inventoryManagement": "SHOPIFY", "price": "0.00", "barcode": upc or ""}]
-        }
+    gql_variants = [{
+        "sku": product_data['sku'],
+        "inventoryManagement": "SHOPIFY",
+        "price": "0.00",
+        "barcode": upc or ""
+    }]
+
+    gql_input = {
+        "title": product_data['title'],
+        "status": "DRAFT",
+        "vendor": product_data['vendor'],
+        "tags": tags,
+        "descriptionHtml": f"<p>Release: {release_date}</p>" if release_date else ""
     }
+
+    mutation = """
+    mutation productCreate($input: ProductInput!, $media: [CreateMediaInput!], $variants: [ProductVariantInput!]) {
+      productCreate(input: $input, media: $media, variants: $variants) {
+        product { id }
+        userErrors { field, message }
+      }
+    }
+    """
+    
+    variables = {"input": gql_input, "media": gql_media, "variants": gql_variants}
     
     url = get_shopify_url() 
     if not url or not SHOPIFY_ACCESS_TOKEN: return None
@@ -403,6 +448,42 @@ def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
     except Exception as e:
         print(f"    [!] Connect Error: {e}")
         return None
+
+def update_shopify_images(shopify_id, image_urls):
+    """
+    Adds images to an existing Shopify product.
+    """
+    if DRY_RUN or not image_urls: return
+
+    gql_media = []
+    for url in image_urls:
+        gql_media.append({
+            "originalSource": url,
+            "mediaContentType": "IMAGE"
+        })
+
+    mutation = """
+    mutation productCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+      productCreateMedia(productId: $productId, media: $media) {
+        media { id, status }
+        mediaUserErrors { field, message }
+      }
+    }
+    """
+    
+    variables = {"productId": shopify_id, "media": gql_media}
+    url = get_shopify_url() 
+    headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+    
+    try:
+        r = requests.post(url, json={"query": mutation, "variables": variables}, headers=headers)
+        if r.status_code == 200:
+            data = r.json()
+            if data['data']['productCreateMedia']['mediaUserErrors']:
+                print(f"    [!] Image Sync Error: {data['data']['productCreateMedia']['mediaUserErrors']}")
+            else:
+                print(f"    [SUCCESS] Synced {len(image_urls)} images to existing product.")
+    except: pass
 
 def check_shopify_status(sku):
     url = get_shopify_url()
@@ -580,19 +661,46 @@ def main():
                 prompts_to_generate.append(prompt)
 
         else:
-            skips_count += 1
-            has_images = existing_product.get('cloudinary_images') or existing_product.get('cloudinary_url')
-            if (not has_images) and source_images:
+            # --- SELF HEALING LOGIC ---
+            # If we know about the product, but stored 'cloudinary_images' is empty/null,
+            # we should try to fetch them again and update Shopify.
+            
+            stored_images = existing_product.get('cloudinary_images')
+            shopify_id = existing_product.get('shopify_id')
+            
+            # Try to recover ID if missing but product might exist
+            if not shopify_id:
+                status_data = check_shopify_status(sku)
+                if status_data: 
+                    shopify_id = status_data['id']
+                    existing_product['shopify_id'] = shopify_id
+                    updates_made = True
+
+            if (not stored_images) and source_images:
+                print(f"   > Backfilling images for {sku}...")
                 cloud_urls = process_and_upload_images(sku, source_images)
+                
                 if cloud_urls:
                     existing_product['cloudinary_images'] = cloud_urls
                     updates_made = True
-            
+                    
+                    if shopify_id:
+                        print(f"   > Syncing new images to Shopify Product {sku}...")
+                        update_shopify_images(shopify_id, cloud_urls)
+                        successful_drafts_count += 1
+            else:
+                skips_count += 1
+                
+            # --- EXISTING CONFLICT CHECK ---
             if not is_avail:
-                s_data = check_shopify_status(sku)
-                if s_data and s_data['status'] == 'ACTIVE' and "Review Needed" not in s_data['tags']:
-                    add_tag(s_data['id'], "Review Needed", sku)
-                    active_conflicts.append(existing_product)
+                if shopify_id: # Use cached ID if available
+                    # We can assume it's active if we found it, but checking status is safer
+                    pass 
+                else:
+                    s_data = check_shopify_status(sku)
+                    if s_data and s_data['status'] == 'ACTIVE' and "Review Needed" not in s_data['tags']:
+                        add_tag(s_data['id'], "Review Needed", sku)
+                        active_conflicts.append(existing_product)
 
     if new_items_added: send_email(f"Import: {len(new_items_added)} New", "Check Shopify.")
     if active_conflicts: send_email(f"ALERT: {len(active_conflicts)} Conflicts", "Check Shopify.")
