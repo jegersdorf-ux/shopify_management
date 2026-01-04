@@ -80,7 +80,6 @@ def send_email(subject, body_html):
         print(f"   !!! Email Failed: {e}")
 
 def get_google_sheet_client():
-    """Auth for Google Sheets."""
     if not GOOGLE_CREDENTIALS_BASE64:
         raise ValueError("CRITICAL ERROR: Secret 'GOOGLE_CREDENTIALS_BASE64' is missing.")
 
@@ -101,7 +100,6 @@ def extract_pdf_text(pdf_url):
         return "DRY RUN: PDF content would be extracted here."
 
     try:
-        # Resolve Google Drive links
         if "drive.google.com" in pdf_url and "/view" in pdf_url:
              pdf_url = pdf_url.replace("/file/d/", "/uc?id=").replace("/view", "").split("?")[0] + "?export=download"
 
@@ -220,7 +218,7 @@ def get_col_index(headers, name):
     """Finds the index of a column safely."""
     name = name.lower().strip()
     for i, h in enumerate(headers):
-        if h.lower().strip() == name:
+        if str(h).lower().strip() == name:
             return i
     return -1
 
@@ -247,17 +245,34 @@ def main():
     client = get_google_sheet_client()
     sheet = client.open_by_url(SHEET_URL).sheet1
     
-    # FIX: Use get_all_values instead of get_all_records to handle empty headers
     all_values = sheet.get_all_values()
     
     if not all_values:
         print("Sheet is empty!")
         return
 
-    headers = all_values[0]
-    data_rows = all_values[1:]
+    # --- SMART HEADER DETECTION ---
+    # Scan first 5 rows to find the one with "SKU"
+    header_row_index = -1
+    headers = []
     
-    print(f"Scanning {len(data_rows)} rows from source...")
+    for i in range(min(5, len(all_values))):
+        row = all_values[i]
+        # Check if 'SKU' is in this row (case-insensitive)
+        if any(str(cell).lower().strip() == 'sku' for cell in row):
+            header_row_index = i
+            headers = row
+            print(f"Found Headers on Row {i+1}: {headers}")
+            break
+            
+    if header_row_index == -1:
+        print("CRITICAL: Could not find 'SKU' column in first 5 rows.")
+        return
+
+    # Data starts AFTER the header row
+    data_rows = all_values[header_row_index + 1:]
+    
+    print(f"Scanning {len(data_rows)} data rows...")
     
     # Map Columns dynamically
     idx_sku = get_col_index(headers, "SKU")
@@ -265,11 +280,6 @@ def main():
     idx_image = get_col_index(headers, "POS Images")
     idx_pdf = get_col_index(headers, "Sell Sheet")
     idx_status = get_col_index(headers, "Status")
-
-    if idx_sku == -1:
-        print("CRITICAL: Could not find 'SKU' column in sheet headers.")
-        print(f"Found headers: {headers}")
-        return
 
     updates_made = False
     new_items_added = []
