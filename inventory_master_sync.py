@@ -11,11 +11,11 @@ import io
 import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from github import Github, Auth  # <--- Updated import
+from github import Github, Auth
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- CONFIGURATION & SECRETS ---
-DRY_RUN = True 
+DRY_RUN = True  # Set to False to go live
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 REPO_NAME = os.getenv('REPO_NAME')
@@ -82,14 +82,10 @@ def send_email(subject, body_html):
 def get_google_sheet_client():
     """Auth for Google Sheets."""
     if not GOOGLE_CREDENTIALS_BASE64:
-        raise ValueError("CRITICAL ERROR: Secret 'GOOGLE_CREDENTIALS_BASE64' is missing or empty.")
+        raise ValueError("CRITICAL ERROR: Secret 'GOOGLE_CREDENTIALS_BASE64' is missing.")
 
     try:
         json_creds = base64.b64decode(GOOGLE_CREDENTIALS_BASE64).decode('utf-8')
-        # Check if decode result is empty
-        if not json_creds:
-             raise ValueError("Decoded credentials are empty.")
-             
         creds_dict = json.loads(json_creds)
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -105,6 +101,7 @@ def extract_pdf_text(pdf_url):
         return "DRY RUN: PDF content would be extracted here."
 
     try:
+        # Resolve Google Drive links
         if "drive.google.com" in pdf_url and "/view" in pdf_url:
              pdf_url = pdf_url.replace("/file/d/", "/uc?id=").replace("/view", "").split("?")[0] + "?export=download"
 
@@ -218,12 +215,21 @@ def add_tag(shopify_id, tag, sku):
     """
     shopify_graphql(mutation, {"id": shopify_id, "tags": [tag]})
 
+# --- COLUMN HELPER ---
+def get_col_index(headers, name):
+    """Finds the index of a column safely."""
+    name = name.lower().strip()
+    for i, h in enumerate(headers):
+        if h.lower().strip() == name:
+            return i
+    return -1
+
 # --- MAIN LOGIC ---
 
 def main():
     print(f"--- STARTING SCRIPT (DRY RUN MODE: {DRY_RUN}) ---")
     
-    # 1. GitHub Connection (Updated for Auth)
+    # 1. GitHub Connection
     auth = Auth.Token(GITHUB_TOKEN)
     g = Github(auth=auth)
     repo = g.get_repo(REPO_NAME)
@@ -240,26 +246,49 @@ def main():
     print("Connecting to Google Sheets...")
     client = get_google_sheet_client()
     sheet = client.open_by_url(SHEET_URL).sheet1
-    rows = sheet.get_all_records()
     
-    print(f"Scanning {len(rows)} rows from source...")
+    # FIX: Use get_all_values instead of get_all_records to handle empty headers
+    all_values = sheet.get_all_values()
+    
+    if not all_values:
+        print("Sheet is empty!")
+        return
+
+    headers = all_values[0]
+    data_rows = all_values[1:]
+    
+    print(f"Scanning {len(data_rows)} rows from source...")
+    
+    # Map Columns dynamically
+    idx_sku = get_col_index(headers, "SKU")
+    idx_title = get_col_index(headers, "Title")
+    idx_image = get_col_index(headers, "POS Images")
+    idx_pdf = get_col_index(headers, "Sell Sheet")
+    idx_status = get_col_index(headers, "Status")
+
+    if idx_sku == -1:
+        print("CRITICAL: Could not find 'SKU' column in sheet headers.")
+        print(f"Found headers: {headers}")
+        return
 
     updates_made = False
     new_items_added = []
     active_conflicts = []
     prompts_to_generate = []
 
-    for row in rows:
-        sku = str(row.get('SKU', '')).strip()
-        title = row.get('Title', '')
-        image_source = row.get('POS Images', '')
-        pdf_source = row.get('Sell Sheet', '')
-        status_text = str(row.get('Status', 'Available')).lower()
-
-        is_available = "out" not in status_text and "unavailable" not in status_text
+    for row in data_rows:
+        # Safely get value by index
+        sku = str(row[idx_sku]).strip() if idx_sku < len(row) else ""
+        title = str(row[idx_title]) if idx_title != -1 and idx_title < len(row) else "Unknown Title"
+        image_source = str(row[idx_image]) if idx_image != -1 and idx_image < len(row) else ""
+        pdf_source = str(row[idx_pdf]) if idx_pdf != -1 and idx_pdf < len(row) else ""
+        status_text = str(row[idx_status]).lower() if idx_status != -1 and idx_status < len(row) else "available"
 
         if not sku: continue
 
+        is_available = "out" not in status_text and "unavailable" not in status_text
+
+        # --- SCENARIO A: NEW ITEM ---
         if sku not in inventory_map:
             if not is_available:
                 continue
@@ -278,6 +307,7 @@ def main():
             new_items_added.append(new_entry)
             updates_made = True
 
+        # --- SCENARIO B: EXISTING ITEM ---
         else:
             product = inventory_map[sku]
             if not is_available:
@@ -287,7 +317,7 @@ def main():
                         add_tag(shopify_data['id'], "Review Needed", sku)
                     active_conflicts.append(product)
 
-        # Process PDF (Dry Run Safe)
+        # Process PDF
         needs_specs = (sku in inventory_map and not inventory_map[sku].get('specs_extracted')) or (sku not in inventory_map and is_available)
         
         if needs_specs and pdf_source and "http" in pdf_source:
