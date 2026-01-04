@@ -20,7 +20,7 @@ from googleapiclient.discovery import build
 # --- CONFIGURATION & SECRETS ---
 DRY_RUN = False        
 TEST_MODE = True       
-TEST_LIMIT = 20        # Increased limit to ensure we hit valid items
+TEST_LIMIT = 10        # Will process until 20 SUCCESSFUL uploads are achieved
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 REPO_NAME = os.getenv('REPO_NAME')
@@ -122,7 +122,6 @@ def get_asmodee_image_links(url):
     if not url: return []
     folder_id = extract_drive_id(url)
     if folder_id:
-        print(f"    > Walking Drive Folder ID: {folder_id}...")
         service = get_drive_service()
         if service: return walk_drive_folder(service, folder_id)
     return [url]
@@ -173,22 +172,18 @@ def discover_shopify_catalog(store_url, vendor_name):
     base_url = f"{store_url}/products.json"
     page = 1
     found_items = []
-    
     while True:
         try:
             r = requests.get(f"{base_url}?limit=250&page={page}")
             if r.status_code != 200: break
             products = r.json().get('products', [])
             if not products: break
-            
             for p in products:
                 if not p.get('variants'): continue
                 variant = p['variants'][0]
                 sku = variant.get('sku')
                 if not sku: continue
-                
                 images = [img['src'] for img in p.get('images', [])]
-                
                 found_items.append({
                     "sku": sku, "title": p['title'], "vendor": vendor_name,
                     "images_source": images, "pdf": "", "upc": variant.get('barcode'),
@@ -209,7 +204,6 @@ def discover_corvus_catalog():
             urls = re.findall(r'<loc>(.*?)</loc>', r.text)
             p_urls = [u for u in urls if '/products/' in u or '/wargames/' in u or '/boardgames/' in u]
             p_urls = [u for u in p_urls if not u.endswith('/wargames') and not u.endswith('/boardgames')]
-            
             for url in p_urls:
                 slug = url.split('/')[-1]
                 found_items.append({
@@ -250,7 +244,6 @@ def resolve_corvus_skeleton(item):
             item['sku'] = sku
             h1 = soup.find('h1')
             if h1: item['title'] = h1.get_text().strip()
-            
             images = []
             og_img = soup.find("meta", property="og:image")
             if og_img: images.append(og_img['content'])
@@ -315,14 +308,7 @@ def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
     if release_date: tags.append(f"Release: {release_date}")
     gql_images = [{"src": url} for url in image_urls]
 
-    mutation = """
-    mutation productCreate($input: ProductInput!) {
-      productCreate(input: $input) {
-        product { id, title }
-        userErrors { field, message }
-      }
-    }
-    """
+    mutation = """mutation productCreate($input: ProductInput!) { productCreate(input: $input) { product { id } userErrors { field, message } } }"""
     variables = {
         "input": {
             "title": product_data['title'], "status": "DRAFT", "vendor": product_data['vendor'], "tags": tags,
@@ -333,7 +319,7 @@ def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
     }
     
     if not SHOPIFY_STORE_URL or not SHOPIFY_ACCESS_TOKEN: 
-        print("    [!] Missing Shopify Credentials.")
+        print("    [!] Missing Credentials")
         return None
         
     url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-10/graphql.json"
@@ -341,31 +327,18 @@ def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
     
     try:
         r = requests.post(url, json={"query": mutation, "variables": variables}, headers=headers)
-        
         if r.status_code == 200:
             data = r.json()
-            if 'data' in data and data['data']['productCreate']:
-                result = data['data']['productCreate']
-                
-                # Check for User Errors (e.g. "SKU taken", "Title missing")
-                if result['userErrors']:
-                    print(f"    [!] Shopify UserError for {product_data['sku']}:")
-                    for err in result['userErrors']:
-                        print(f"        - {err['field']}: {err['message']}")
-                    return None
-                
-                if result['product']:
-                    print(f"    [SUCCESS] Created Draft: {result['product']['id']}")
-                    return result['product']['id']
-            
-            print(f"    [!] Unexpected Shopify Response: {data}")
-            return None
+            if data['data']['productCreate']['userErrors']:
+                print(f"    [!] Shopify UserError: {data['data']['productCreate']['userErrors']}")
+                return None
+            print(f"    [SUCCESS] Created Draft: {data['data']['productCreate']['product']['id']}")
+            return data['data']['productCreate']['product']['id']
         else:
-            print(f"    [!] Shopify API Error {r.status_code}: {r.text}")
+            print(f"    [!] Shopify API Error: {r.text}")
             return None
-
     except Exception as e:
-        print(f"    [!] Shopify Connection Exception: {e}")
+        print(f"    [!] Connect Error: {e}")
         return None
 
 def check_shopify_status(sku):
@@ -410,7 +383,7 @@ def get_col_index(headers, name):
 # ==========================================
 
 def main():
-    print(f"--- STARTING MASTER SYNC (TEST MODE: {TEST_MODE} | LIMIT: {TEST_LIMIT}) ---")
+    print(f"--- STARTING MASTER SYNC (TEST MODE: {TEST_MODE} | LIMIT: {TEST_LIMIT} SUCCESSFUL ITEMS) ---")
     
     if not SHOPIFY_STORE_URL or not SHOPIFY_ACCESS_TOKEN:
         print("CRITICAL WARNING: SHOPIFY_STORE_URL or SHOPIFY_ACCESS_TOKEN is missing.")
@@ -465,11 +438,13 @@ def main():
     new_items_added = []
     active_conflicts = []
     prompts_to_generate = []
-    items_processed_count = 0 
+    
+    successful_drafts_count = 0 
+    skips_count = 0
 
     for item in all_rows:
-        if TEST_MODE and items_processed_count >= TEST_LIMIT:
-            print(f"--- TEST LIMIT REACHED ({TEST_LIMIT} items). Stopping Loop. ---")
+        if TEST_MODE and successful_drafts_count >= TEST_LIMIT:
+            print(f"--- TEST LIMIT REACHED ({TEST_LIMIT} successful uploads). Stopping Loop. ---")
             break
 
         if item.get('is_skeleton'):
@@ -481,6 +456,10 @@ def main():
         sku = item['sku']
         vendor = item['vendor']
         
+        # Verbose progress check
+        if (skips_count + successful_drafts_count) % 50 == 0:
+            print(f"Processing... (Skips: {skips_count} | Success: {successful_drafts_count})")
+
         is_avail = True
         if vendor == "Asmodee":
             if not DRY_RUN: time.sleep(0.5)
@@ -492,11 +471,13 @@ def main():
         source_images = item.get('images_source', [])
 
         if not existing_product:
-            if not is_avail: continue
+            if not is_avail:
+                skips_count += 1
+                continue
             
             # --- MODIFIED RULE: NO IMAGE = SKIP ONLY FOR ASMODEE ---
             if vendor == "Asmodee" and not source_images:
-                print(f"    [SKIP] Asmodee Item {sku} has no images. Recording but skipping Shopify.")
+                print(f"    [SKIP] Asmodee Item {sku} has no images.")
                 new_entry = {
                     "sku": sku, "title": item['title'], "vendor": vendor,
                     "cloudinary_images": [], "shopify_id": None,
@@ -505,21 +486,27 @@ def main():
                 }
                 inventory_map[sku] = new_entry
                 updates_made = True
-                items_processed_count += 1
+                skips_count += 1
                 continue
             # -----------------------------------------------------
 
+            print(f"   > Uploading {sku}...")
             cloud_urls = process_and_upload_images(sku, source_images)
             shopify_id = create_shopify_draft(item, cloud_urls, item.get('release_date'), item.get('upc'))
-            new_entry = {
-                "sku": sku, "title": item['title'], "vendor": vendor,
-                "cloudinary_images": cloud_urls, "shopify_id": shopify_id,
-                "release_date": item.get('release_date'), "upc": item.get('upc')
-            }
-            inventory_map[sku] = new_entry
-            new_items_added.append(new_entry)
-            updates_made = True
-            items_processed_count += 1
+            
+            if shopify_id:
+                new_entry = {
+                    "sku": sku, "title": item['title'], "vendor": vendor,
+                    "cloudinary_images": cloud_urls, "shopify_id": shopify_id,
+                    "release_date": item.get('release_date'), "upc": item.get('upc')
+                }
+                inventory_map[sku] = new_entry
+                new_items_added.append(new_entry)
+                updates_made = True
+                successful_drafts_count += 1 # <--- INCREMENT SUCCESS ONLY HERE
+            else:
+                 print(f"   [FAIL] Shopify upload failed for {sku}")
+                 skips_count += 1
             
             if item.get('pdf') or vendor == "Asmodee":
                 txt = extract_pdf_text(item.get('pdf')) if item.get('pdf') else ""
@@ -527,6 +514,7 @@ def main():
                 prompts_to_generate.append(prompt)
 
         else:
+            skips_count += 1
             # Existing Item Check
             has_images = existing_product.get('cloudinary_images') or existing_product.get('cloudinary_url')
             if (not has_images) and source_images:
@@ -540,8 +528,6 @@ def main():
                 if s_data and s_data['status'] == 'ACTIVE' and "Review Needed" not in s_data['tags']:
                     add_tag(s_data['id'], "Review Needed", sku)
                     active_conflicts.append(existing_product)
-            
-            items_processed_count += 1
 
     if new_items_added: send_email(f"Import: {len(new_items_added)} New", "Check Shopify.")
     if active_conflicts: send_email(f"ALERT: {len(active_conflicts)} Conflicts", "Check Shopify.")
