@@ -1,31 +1,32 @@
-name: Inspect Shopify Sources
+name: Standalone Price & Cost Updater
 
 on:
-  workflow_dispatch:  # Manual trigger button
+  # Allows you to manually trigger this workflow from the Actions tab
+  workflow_dispatch:
 
 jobs:
-  inspect-data:
+  run-updater:
     runs-on: ubuntu-latest
-    
+
     steps:
-      - name: Checkout Code
+      # 1. Check out the code (so it can read the JSON files in the repo)
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # 2. Set up Python environment
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
+      # 3. Install the only dependency needed for this script
       - name: Install Requests
         run: pip install requests
 
-      - name: Run Inspector Script
-        run: python source_inspector.py
-
-      - name: Upload Raw JSON Data
-        uses: actions/upload-artifact@v4
-        with:
-          name: shopify-source-data
-          path: |
-            raw_export_moonstone.json
-            raw_export_warsenal.json
+      # 4. Run the standalone script
+      - name: Run Updater Script
+        env:
+          # Uses the same secrets as your main pipeline
+          SHOPIFY_STORE_URL: ${{ secrets.SHOPIFY_STORE_URL }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+        run: python standalone_json_updater.py
