@@ -20,7 +20,7 @@ from googleapiclient.discovery import build
 # --- CONFIGURATION & SECRETS ---
 DRY_RUN = False        
 TEST_MODE = True       
-TEST_LIMIT = 20        # Will process until 20 SUCCESSFUL uploads are achieved
+TEST_LIMIT = 20        
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 REPO_NAME = os.getenv('REPO_NAME')
@@ -31,7 +31,7 @@ GOOGLE_CREDENTIALS_BASE64 = os.getenv('GOOGLE_CREDENTIALS_BASE64')
 
 SHOPIFY_STORE_URL = os.getenv('SHOPIFY_STORE_URL')
 SHOPIFY_ACCESS_TOKEN = os.getenv('SHOPIFY_ACCESS_TOKEN')
-SHOPIFY_API_VERSION = "2026-01" # Updated to the newest 2026 version
+SHOPIFY_API_VERSION = "2026-01" 
 
 EMAIL_SENDER = os.getenv('EMAIL_SENDER')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
@@ -51,7 +51,6 @@ ASMODEE_PREFIXES = [
     "CPE", "CP", "SWP", "SWQ"
 ]
 
-# Initialize Cloudinary
 if not DRY_RUN:
     cloudinary.config(
         cloud_name=CLOUDINARY_CLOUD_NAME, 
@@ -59,7 +58,6 @@ if not DRY_RUN:
         api_secret=CLOUDINARY_API_SECRET
     )
 
-# --- GLOBAL LOGGING ---
 dry_run_logs = []
 
 def log_action(action_type, sku, details):
@@ -68,13 +66,50 @@ def log_action(action_type, sku, details):
     dry_run_logs.append(entry)
 
 # ==========================================
-#           SHOPIFY HELPER (UPDATED)
+#           SHOPIFY HELPER (DEBUGGED)
 # ==========================================
 def get_shopify_url():
     if not SHOPIFY_STORE_URL: return None
-    # Clean URL to ensure no double https://
-    clean_url = SHOPIFY_STORE_URL.replace("https://", "").replace("http://", "").strip("/")
+    # Aggressive cleaning
+    clean_url = SHOPIFY_STORE_URL.strip()
+    clean_url = clean_url.replace("https://", "").replace("http://", "")
+    clean_url = clean_url.rstrip("/") # Remove trailing slash
+    
+    # Remove '/admin' if the user accidentally pasted it
+    if clean_url.endswith("/admin"):
+        clean_url = clean_url[:-6]
+        
     return f"https://{clean_url}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+
+def test_shopify_connection():
+    """
+    Runs a simple query to verify the URL and Token before starting.
+    """
+    print("\n--- TESTING SHOPIFY CONNECTION ---")
+    url = get_shopify_url()
+    print(f"Target URL: {url}") 
+    
+    if not url:
+        print("FAIL: SHOPIFY_STORE_URL is missing.")
+        return False
+
+    query = "{ shop { name, myshopifyDomain } }"
+    headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+    
+    try:
+        r = requests.post(url, json={"query": query}, headers=headers)
+        if r.status_code == 200:
+            shop = r.json().get('data', {}).get('shop', {})
+            print(f"SUCCESS: Connected to '{shop.get('name')}' ({shop.get('myshopifyDomain')})")
+            print("----------------------------------\n")
+            return True
+        else:
+            print(f"FAIL: Status {r.status_code}")
+            print(f"Response: {r.text}")
+            return False
+    except Exception as e:
+        print(f"FAIL: Exception connecting: {e}")
+        return False
 
 # ==========================================
 #           GOOGLE API HELPERS
@@ -329,10 +364,7 @@ def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
     }
     
     url = get_shopify_url() 
-    if not url or not SHOPIFY_ACCESS_TOKEN:
-        print("    [!] Missing Credentials")
-        return None
-
+    if not url or not SHOPIFY_ACCESS_TOKEN: return None
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
     
     try:
@@ -400,9 +432,10 @@ def get_col_index(headers, name):
 def main():
     print(f"--- STARTING MASTER SYNC (TEST MODE: {TEST_MODE} | LIMIT: {TEST_LIMIT} SUCCESSFUL ITEMS) ---")
     
-    if not SHOPIFY_STORE_URL or not SHOPIFY_ACCESS_TOKEN:
-        print("CRITICAL WARNING: SHOPIFY_STORE_URL or SHOPIFY_ACCESS_TOKEN is missing.")
-    
+    if not test_shopify_connection():
+        print("CRITICAL: Cannot connect to Shopify. Exiting.")
+        return
+
     auth = Auth.Token(GITHUB_TOKEN)
     g = Github(auth=auth)
     repo = g.get_repo(REPO_NAME)
