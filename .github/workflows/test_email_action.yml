@@ -1,0 +1,23 @@
+name: Test Email Config
+
+on:
+  workflow_dispatch: # This adds a "Run Workflow" button
+
+jobs:
+  test-email:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Run Email Test
+        env:
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }} # Ensure this secret exists too!
+        run: python test_email_config.py
