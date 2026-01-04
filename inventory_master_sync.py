@@ -26,7 +26,7 @@ from googleapiclient.discovery import build
 DRY_RUN = False        
 TEST_MODE = True       
 TEST_LIMIT = 20        
-RESET_IGNORED_ITEMS = False # Set True to retry "Dead" items
+RESET_IGNORED_ITEMS = False
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 REPO_NAME = os.getenv('REPO_NAME')
@@ -101,7 +101,6 @@ def test_shopify_connection():
     if "myshopify.com" not in domain_part:
         print("\n[!!!] CRITICAL WARNING:")
         print(f"      You are using: '{domain_part}'")
-        print("      This looks like the 'Human Login' page, not the API address.")
         return False
 
     query = "{ shop { name, myshopifyDomain } }"
@@ -122,7 +121,6 @@ def test_shopify_connection():
              return False
         else:
             print(f"FAIL: Status {r.status_code}")
-            print(f"Response: {r.text}")
             return False
     except Exception as e:
         print(f"FAIL: Exception connecting: {e}")
@@ -287,7 +285,8 @@ def scrape_asmodee_status(sku):
         r = requests.get(search_url, timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
         link = soup.find('a', href=re.compile(r'/products/'))
-        if not link: return False
+        if not link: return False 
+        
         r2 = requests.get("https://store.asmodee.com" + link['href'], timeout=10)
         text = BeautifulSoup(r2.text, 'html.parser').get_text().lower()
         return "add to cart" in text and "sold out" not in text
@@ -311,7 +310,8 @@ def resolve_corvus_skeleton(item):
             if og_img: images.append(og_img['content'])
             for img in soup.find_all('img'):
                 src = img.get('src') or img.get('data-src')
-                if src and 'assets.corvusbelli' in src and not any(x in src for x in ['icon', 'logo']):
+                # TIGHTER FILTER for Corvus (Product images only, no logos)
+                if src and 'assets.corvusbelli' in src and not any(x in src for x in ['icon', 'logo', 'banner', 'footer']):
                     images.append(src)
             item['images_source'] = list(set(images))
             item['active_status'] = "add to cart" in soup.get_text().lower()
@@ -340,35 +340,49 @@ def send_email(subject, body_html):
         server.quit()
     except: pass
 
-def process_and_upload_images(sku, source_urls):
+def determine_cloudinary_folder(vendor):
+    """Routing logic for image folders based on Vendor"""
+    v_lower = str(vendor).lower()
+    if "moonstone" in v_lower:
+        return f"{CLOUDINARY_ROOT_FOLDER}/Moonstone"
+    elif "warsenal" in v_lower:
+        return f"{CLOUDINARY_ROOT_FOLDER}/Infinity"
+    elif "corvus" in v_lower:
+        return f"{CLOUDINARY_ROOT_FOLDER}/Infinity"
+    elif "asmodee" in v_lower:
+        return f"{CLOUDINARY_ROOT_FOLDER}/Asmodee"
+    else:
+        return f"{CLOUDINARY_ROOT_FOLDER}/Other"
+
+def process_and_upload_images(sku, source_urls, vendor):
     global RATE_LIMIT_HIT 
+    
     if not source_urls: return []
     uploaded_urls = []
     source_urls = list(set(source_urls)) 
 
+    # Dynamic folder selection
+    target_folder = determine_cloudinary_folder(vendor)
+
     for i, url in enumerate(source_urls):
         if not url or "http" not in url: continue
         if RATE_LIMIT_HIT:
-            print(f"    [!] Cloudinary Rate Limit Active. Using source URL.")
             uploaded_urls.append(url)
             continue
 
         suffix = f"_{i}" if i > 0 else ""
         clean_sku = "".join(x for x in sku if x.isalnum() or x in "-_")
-        
-        # NOTE: We now use specific folder + simple ID, instead of complex path
         public_id_name = f"{clean_sku}{suffix}"
         
         if DRY_RUN:
-            log_action("CLOUDINARY", sku, f"Upload {public_id_name}")
+            log_action("CLOUDINARY", sku, f"Upload {public_id_name} to {target_folder}")
             uploaded_urls.append("https://res.cloudinary.com/demo/image.jpg")
             continue
             
         try:
-            # Force Folder using the 'folder' parameter
             res = cloudinary.uploader.upload(
                 url, 
-                folder=CLOUDINARY_ROOT_FOLDER, # <--- EXPLICIT FOLDER
+                folder=target_folder, # Dynamic folder
                 public_id=public_id_name, 
                 overwrite=True, 
                 unique_filename=False
@@ -662,7 +676,8 @@ def main():
                     continue
 
             print(f"   > Uploading {sku}...")
-            cloud_urls = process_and_upload_images(sku, source_images)
+            # --- PASS VENDOR TO UPLOAD FUNCTION ---
+            cloud_urls = process_and_upload_images(sku, source_images, vendor)
             
             # --- 3-STEP CREATION ---
             prod_id, variant_id = create_shopify_product_shell(item, item.get('release_date'))
@@ -704,7 +719,8 @@ def main():
 
             if (not stored_images) and source_images:
                 print(f"   > Backfilling images for {sku}...")
-                cloud_urls = process_and_upload_images(sku, source_images)
+                # --- PASS VENDOR TO UPLOAD FUNCTION ---
+                cloud_urls = process_and_upload_images(sku, source_images, vendor)
                 if cloud_urls:
                     existing_product['cloudinary_images'] = cloud_urls
                     updates_made = True
