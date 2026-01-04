@@ -31,7 +31,7 @@ GOOGLE_CREDENTIALS_BASE64 = os.getenv('GOOGLE_CREDENTIALS_BASE64')
 
 SHOPIFY_STORE_URL = os.getenv('SHOPIFY_STORE_URL')
 SHOPIFY_ACCESS_TOKEN = os.getenv('SHOPIFY_ACCESS_TOKEN')
-SHOPIFY_API_VERSION = "2026-01" 
+SHOPIFY_API_VERSION = "2025-10" # Stable Fallback
 
 EMAIL_SENDER = os.getenv('EMAIL_SENDER')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
@@ -51,6 +51,7 @@ ASMODEE_PREFIXES = [
     "CPE", "CP", "SWP", "SWQ"
 ]
 
+# Initialize Cloudinary
 if not DRY_RUN:
     cloudinary.config(
         cloud_name=CLOUDINARY_CLOUD_NAME, 
@@ -66,32 +67,32 @@ def log_action(action_type, sku, details):
     dry_run_logs.append(entry)
 
 # ==========================================
-#           SHOPIFY HELPER (DEBUGGED)
+#           SHOPIFY HELPER (AGGRESSIVE FIX)
 # ==========================================
 def get_shopify_url():
     if not SHOPIFY_STORE_URL: return None
-    # Aggressive cleaning
-    clean_url = SHOPIFY_STORE_URL.strip()
-    clean_url = clean_url.replace("https://", "").replace("http://", "")
-    clean_url = clean_url.rstrip("/") # Remove trailing slash
     
-    # Remove '/admin' if the user accidentally pasted it
-    if clean_url.endswith("/admin"):
-        clean_url = clean_url[:-6]
+    # 1. Remove protocol
+    clean_url = SHOPIFY_STORE_URL.replace("https://", "").replace("http://", "")
+    
+    # 2. Extract ONLY the domain (everything before the first slash)
+    # This fixes issues if the secret is "store.com/admin"
+    if "/" in clean_url:
+        clean_url = clean_url.split("/")[0]
         
+    clean_url = clean_url.strip()
+    
     return f"https://{clean_url}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
 
 def test_shopify_connection():
-    """
-    Runs a simple query to verify the URL and Token before starting.
-    """
     print("\n--- TESTING SHOPIFY CONNECTION ---")
     url = get_shopify_url()
-    print(f"Target URL: {url}") 
+    # print(f"Target: {url}") # Masking for security in logs
     
-    if not url:
-        print("FAIL: SHOPIFY_STORE_URL is missing.")
-        return False
+    if "myshopify.com" not in url:
+        print("[WARNING] Your SHOPIFY_STORE_URL does not appear to be a 'myshopify.com' domain.")
+        print("          API calls usually fail on custom domains (e.g. www.yoursite.com).")
+        print("          Please use: your-handle.myshopify.com")
 
     query = "{ shop { name, myshopifyDomain } }"
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
@@ -100,7 +101,7 @@ def test_shopify_connection():
         r = requests.post(url, json={"query": query}, headers=headers)
         if r.status_code == 200:
             shop = r.json().get('data', {}).get('shop', {})
-            print(f"SUCCESS: Connected to '{shop.get('name')}' ({shop.get('myshopifyDomain')})")
+            print(f"SUCCESS: Connected to '{shop.get('name')}'")
             print("----------------------------------\n")
             return True
         else:
@@ -504,6 +505,7 @@ def main():
         sku = item['sku']
         vendor = item['vendor']
         
+        # Verbose progress check
         if (skips_count + successful_drafts_count) % 50 == 0:
             print(f"Processing... (Skips: {skips_count} | Success: {successful_drafts_count})")
 
@@ -522,6 +524,7 @@ def main():
                 skips_count += 1
                 continue
             
+            # --- MODIFIED RULE: NO IMAGE = SKIP ONLY FOR ASMODEE ---
             if vendor == "Asmodee" and not source_images:
                 print(f"    [SKIP] Asmodee Item {sku} has no images.")
                 new_entry = {
@@ -534,6 +537,7 @@ def main():
                 updates_made = True
                 skips_count += 1
                 continue
+            # -----------------------------------------------------
 
             print(f"   > Uploading {sku}...")
             cloud_urls = process_and_upload_images(sku, source_images)
