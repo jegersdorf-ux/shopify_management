@@ -18,7 +18,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 
 # --- CONFIGURATION & SECRETS ---
-DRY_RUN = True  # Set to False to GO LIVE
+DRY_RUN = False  # Set to False to GO LIVE
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 REPO_NAME = os.getenv('REPO_NAME')
@@ -126,58 +126,36 @@ def get_asmodee_image_links(url):
     return [url]
 
 def get_visible_sheet_values(sheet_url):
-    """
-    Fetches ONLY rows that are NOT hidden in the Google Sheet.
-    Respects GID (Tab ID) from URL.
-    """
-    # 1. Parse Spreadsheet ID and GID
     match_id = re.search(r'/d/([a-zA-Z0-9-_]+)', sheet_url)
     if not match_id: return []
     spreadsheet_id = match_id.group(1)
     
-    # Default GID is 0 (first tab), unless specified in URL
     target_gid = 0
     match_gid = re.search(r'[#&]gid=([0-9]+)', sheet_url)
-    if match_gid:
-        target_gid = int(match_gid.group(1))
+    if match_gid: target_gid = int(match_gid.group(1))
 
     service = get_sheets_service()
     if not service: return []
     
     try:
-        # Fetch data with metadata
-        spreadsheet = service.spreadsheets().get(
-            spreadsheetId=spreadsheet_id,
-            includeGridData=True
-        ).execute()
-        
-        # Find the correct sheet by GID
+        spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id, includeGridData=True).execute()
         target_sheet = None
         for s in spreadsheet['sheets']:
             if s['properties']['sheetId'] == target_gid:
                 target_sheet = s
                 break
         
-        if not target_sheet:
-            print(f"    [!] Could not find tab with GID {target_gid}")
-            return []
-
+        if not target_sheet: return []
         print(f"    > Reading Tab: {target_sheet['properties']['title']} (GID: {target_gid})")
         
         rows = target_sheet['data'][0].get('rowData', [])
         visible_rows = []
-        hidden_count = 0
         
         for row in rows:
-            # Check Metadata for hiding
             user_hidden = row.get('rowMetadata', {}).get('hiddenByUser', False)
             filter_hidden = row.get('rowMetadata', {}).get('hiddenByFilter', False)
+            if user_hidden or filter_hidden: continue 
             
-            if user_hidden or filter_hidden:
-                hidden_count += 1
-                continue 
-            
-            # Extract cell values
             values = []
             if 'values' in row:
                 for cell in row['values']:
@@ -185,13 +163,8 @@ def get_visible_sheet_values(sheet_url):
                     text = val.get('stringValue', str(val.get('numberValue', '')))
                     values.append(text)
             visible_rows.append(values)
-            
-        print(f"    > Loaded {len(visible_rows)} visible rows (Skipped {hidden_count} hidden).")
         return visible_rows
-
-    except Exception as e:
-        print(f"    [!] Sheet API Error: {e}")
-        return []
+    except: return []
 
 # ==========================================
 #           CATALOG DISCOVERY
@@ -420,7 +393,7 @@ def main():
     warsenal_items = discover_shopify_catalog("https://warsen.al", "Warsenal")
     corvus_skeletons = discover_corvus_catalog()
     
-    # 3. LOAD ASMODEE (VISIBLE ROWS ONLY)
+    # 3. LOAD ASMODEE
     asmodee_items = []
     try:
         print("Connecting to Google Sheet (Filtering Hidden Rows)...")
@@ -443,10 +416,8 @@ def main():
                     sku = str(row[idx_sku]).strip()
                     if not sku: continue
                     if any(sku.startswith(p) for p in ASMODEE_PREFIXES):
-                        # Recursive Folder Scan for images
                         raw_link = str(row[idx_img]) if idx_img != -1 else ""
                         resolved_images = get_asmodee_image_links(raw_link)
-                        
                         asmodee_items.append({
                             "sku": sku, "title": row[idx_title], "vendor": "Asmodee",
                             "images_source": resolved_images,
@@ -485,6 +456,21 @@ def main():
 
         if not existing_product:
             if not is_avail: continue
+            
+            # --- ASMODEE RULE: NO IMAGE = SKIP ---
+            if vendor == "Asmodee" and not source_images:
+                print(f"    [SKIP] Asmodee Item {sku} has no images. Recording but skipping Shopify.")
+                new_entry = {
+                    "sku": sku, "title": item['title'], "vendor": vendor,
+                    "cloudinary_images": [], "shopify_id": None,
+                    "shopify_status": "SKIPPED_NO_IMAGE", 
+                    "release_date": item.get('release_date'), "upc": item.get('upc')
+                }
+                inventory_map[sku] = new_entry
+                updates_made = True
+                continue
+            # ------------------------------------
+
             cloud_urls = process_and_upload_images(sku, source_images)
             shopify_id = create_shopify_draft(item, cloud_urls, item.get('release_date'), item.get('upc'))
             new_entry = {
