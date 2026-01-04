@@ -71,7 +71,7 @@ dry_run_logs = []
 
 def log_action(action_type, sku, details):
     entry = f"| {action_type} | **{sku}** | {details} |"
-    print(f"[DRY RUN] {entry}", flush=True)
+    print(f"[DRY RUN] {entry}")
     dry_run_logs.append(entry)
 
 # ==========================================
@@ -80,7 +80,6 @@ def log_action(action_type, sku, details):
 def get_shopify_url():
     if not SHOPIFY_STORE_URL: return None
     clean_url = SHOPIFY_STORE_URL.strip()
-    # Handle user pasting browser URL
     if "admin.shopify.com" in clean_url and "/store/" in clean_url:
         try:
             handle = clean_url.split("/store/")[1].split("/")[0]
@@ -107,7 +106,7 @@ def test_shopify_connection():
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
     
     try:
-        r = requests.post(url, json={"query": query}, headers=headers, timeout=10) # Added timeout
+        r = requests.post(url, json={"query": query}, headers=headers, timeout=10)
         if r.status_code == 200:
             shop = r.json().get('data', {}).get('shop', {})
             print(f"SUCCESS: Connected to '{shop.get('name')}'", flush=True)
@@ -235,7 +234,7 @@ def discover_shopify_catalog(store_url, vendor_name):
     found_items = []
     while True:
         try:
-            r = requests.get(f"{base_url}?limit=250&page={page}", timeout=15) # Added timeout
+            r = requests.get(f"{base_url}?limit=250&page={page}", timeout=15)
             if r.status_code != 200: break
             products = r.json().get('products', [])
             if not products: break
@@ -260,7 +259,7 @@ def discover_corvus_catalog():
     sitemap_url = "https://store.corvusbelli.com/sitemap.xml"
     found_items = []
     try:
-        r = requests.get(sitemap_url, timeout=15) # Added timeout
+        r = requests.get(sitemap_url, timeout=15)
         if r.status_code == 200:
             urls = re.findall(r'<loc>(.*?)</loc>', r.text)
             p_urls = [u for u in urls if '/products/' in u or '/wargames/' in u or '/boardgames/' in u]
@@ -283,11 +282,11 @@ def scrape_asmodee_status(sku):
     search_url = f"https://store.asmodee.com/search?q={sku}&type=product"
     if DRY_RUN: return True
     try:
-        r = requests.get(search_url, timeout=10) # Added timeout
+        r = requests.get(search_url, timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
         link = soup.find('a', href=re.compile(r'/products/'))
         if not link: return False
-        r2 = requests.get("https://store.asmodee.com" + link['href'], timeout=10) # Added timeout
+        r2 = requests.get("https://store.asmodee.com" + link['href'], timeout=10)
         text = BeautifulSoup(r2.text, 'html.parser').get_text().lower()
         return "add to cart" in text and "sold out" not in text
     except: return False
@@ -296,7 +295,7 @@ def resolve_corvus_skeleton(item):
     url = item['url']
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        r = requests.get(url, headers=headers, timeout=10) # Added timeout
+        r = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
         sku = None
         ref_match = re.search(r'Ref:\s*([A-Za-z0-9\-]+)', soup.get_text())
@@ -430,7 +429,7 @@ def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
     
     try:
-        r = requests.post(url, json={"query": mutation, "variables": variables}, headers=headers, timeout=20) # Added timeout
+        r = requests.post(url, json={"query": mutation, "variables": variables}, headers=headers, timeout=20)
         if r.status_code == 200:
             data = r.json()
             if 'errors' in data:
@@ -598,7 +597,6 @@ def main():
         sku = item['sku']
         vendor = item['vendor']
         
-        # Verbose progress check
         if (skips_count + successful_drafts_count) % 50 == 0:
             print(f"Processing... (Skips: {skips_count} | Success: {successful_drafts_count})", flush=True)
 
@@ -653,7 +651,6 @@ def main():
                 prompts_to_generate.append(prompt)
 
         else:
-            # --- SELF HEALING LOGIC ---
             stored_images = existing_product.get('cloudinary_images')
             shopify_id = existing_product.get('shopify_id')
             
@@ -692,4 +689,16 @@ def main():
     if DRY_RUN:
         print("Saving Dry Run Report...", flush=True)
         report = "\n".join(dry_run_logs)
-        try: repo.update_file(REPORT_FILE
+        try: repo.update_file(REPORT_FILE_PATH, "Report", report, repo.get_contents(REPORT_FILE_PATH).sha)
+        except: repo.create_file(REPORT_FILE_PATH, "Report", report)
+    elif updates_made:
+        print("Saving JSON...", flush=True)
+        try: repo.update_file(JSON_FILE_PATH, "Sync", json.dumps(list(inventory_map.values()), indent=2), repo.get_contents(JSON_FILE_PATH).sha)
+        except: repo.create_file(JSON_FILE_PATH, "Sync", json.dumps(list(inventory_map.values()), indent=2))
+        if prompts_to_generate:
+             full_prompt = "\n".join(prompts_to_generate)
+             try: repo.update_file(PROMPTS_FILE_PATH, "Prompts", full_prompt, repo.get_contents(PROMPTS_FILE_PATH).sha)
+             except: repo.create_file(PROMPTS_FILE_PATH, "Prompts", full_prompt)
+
+if __name__ == "__main__":
+    main()
