@@ -12,6 +12,14 @@ import re
 import time
 import warnings
 import traceback
+import sys
+from datetime import datetime
+
+# --- PYTHON 3.9 COMPATIBILITY PATCH ---
+if sys.version_info < (3, 10):
+    import importlib.metadata
+    if not hasattr(importlib.metadata, 'packages_distributions'):
+        importlib.metadata.packages_distributions = lambda: {}
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -27,7 +35,7 @@ from googleapiclient.discovery import build
 DRY_RUN = False        
 TEST_MODE = True       
 TEST_LIMIT = 20        
-RESET_IGNORED_ITEMS = False
+RESET_IGNORED_ITEMS = True
 
 # --- TESTING FLAGS ---
 ENABLE_MOONSTONE = True
@@ -213,7 +221,6 @@ def clean_html_for_seo(html_content):
     return clean[:300] 
 
 def safe_float(val):
-    """Safely converts price strings/numbers to float for comparison"""
     if val is None: return 0.0
     try:
         return float(str(val).replace(",", "").strip())
@@ -318,7 +325,8 @@ def discover_corvus_catalog():
                     "weight_unit": "g",
                     "upc": "",
                     "price": "0.00",
-                    "compare_at_price": None
+                    "compare_at_price": None,
+                    "release_date": None
                 })
     except Exception as e:
         print(f"    [ERROR] Corvus Discovery: {e}", flush=True)
@@ -427,7 +435,6 @@ def get_visible_sheet_values(sheet_url):
 #           SCRAPING / RESOLVING
 # ==========================================
 
-# NOTE: This function is preserved but no longer blocks logic
 def scrape_asmodee_status(sku):
     search_url = f"https://store.asmodee.com/search?q={sku}&type=product"
     try:
@@ -622,7 +629,7 @@ def create_shopify_product_shell(product_data, release_date=None):
         return None, None, None
 
 def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRAMS', price="0.00", compare_at=None):
-    """ STEP 2: Update Variant Data (Exposed Error Handling) """
+    """ STEP 2: Update Variant Data """
     if DRY_RUN or not variant_id: return
 
     shopify_unit = "GRAMS"
@@ -652,11 +659,7 @@ def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRA
         "weightUnit": shopify_unit
     }
     
-    # Safe float compare for Compare At Price
-    price_val = safe_float(price)
-    compare_val = safe_float(compare_at)
-    
-    if compare_val > price_val:
+    if compare_at and float(compare_at) > float(price):
         gql_input["compareAtPrice"] = str(compare_at)
 
     url = get_shopify_url() 
@@ -668,7 +671,7 @@ def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRA
         if data.get('data', {}).get('productVariantUpdate', {}).get('userErrors'):
              print(f"    [!] Variant Update Error for {sku}: {data['data']['productVariantUpdate']['userErrors']}", flush=True)
         else:
-             print(f"    [SUCCESS] Updated Variant {sku}", flush=True) # Confirm success
+             print(f"    [SUCCESS] Updated Variant {sku}", flush=True)
         time.sleep(0.5) 
     except Exception as e:
         print(f"    [CRITICAL] Variant Update Crash for {sku}: {e}", flush=True)
@@ -700,7 +703,7 @@ def activate_inventory_at_location(inventory_item_id, location_id):
         time.sleep(0.5) 
     except: pass
 
-def update_product_metafields(product_id, game_name, faction=""):
+def update_product_metafields(product_id, game_name, faction="", release_date=None):
     """ STEP 2.75: Add Metafields """
     if DRY_RUN or not product_id: return
 
@@ -713,23 +716,35 @@ def update_product_metafields(product_id, game_name, faction=""):
     }
     """
     
+    # 1. Game Name (LIST)
     fields = [
         {
             "ownerId": product_id,
             "namespace": "custom",
             "key": "game_name",
-            "type": "list.single_line_text_field", # LIST
+            "type": "list.single_line_text_field",
             "value": json.dumps([game_name])
         }
     ]
     
+    # 2. Primary Faction (SINGLE)
     if faction:
         fields.append({
             "ownerId": product_id,
             "namespace": "custom",
             "key": "primary_faction",
-            "type": "single_line_text_field", # SINGLE
+            "type": "single_line_text_field",
             "value": faction
+        })
+
+    # 3. Release Date (DATE)
+    if release_date:
+        fields.append({
+            "ownerId": product_id,
+            "namespace": "custom",
+            "key": "release_date",
+            "type": "date",
+            "value": release_date # Must be YYYY-MM-DD
         })
     
     url = get_shopify_url() 
@@ -890,7 +905,8 @@ def main():
                                 "weight_unit": "g",
                                 "price": "0.00",
                                 "compare_at_price": None,
-                                "primary_faction": ""
+                                "primary_faction": "",
+                                "release_date": None
                             })
         except Exception as e: print(f"Sheet Error: {e}", flush=True)
 
@@ -968,9 +984,14 @@ def main():
                 if inventory_item_id and DELTONA_LOCATION_ID:
                     activate_inventory_at_location(inventory_item_id, DELTONA_LOCATION_ID)
                 
-                # 3. Set Metafields (Game Name + Faction)
+                # 3. Set Metafields (Game Name + Faction + Release)
                 if item.get('game_name'):
-                    update_product_metafields(prod_id, item['game_name'], item.get('primary_faction', ''))
+                    update_product_metafields(
+                        prod_id, 
+                        item['game_name'], 
+                        item.get('primary_faction', ''),
+                        item.get('release_date')
+                    )
 
                 # 4. Attach Images
                 update_shopify_images(prod_id, cloud_urls, alt_text=item['title'])
