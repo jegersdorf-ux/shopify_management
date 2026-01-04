@@ -221,9 +221,11 @@ def clean_html_for_seo(html_content):
     return clean[:300] 
 
 def safe_float(val):
-    if val is None: return 0.0
+    if val is None or val == "": return 0.0
     try:
-        return float(str(val).replace(",", "").strip())
+        # Remove currency symbols and commas
+        clean_val = str(val).replace("$", "").replace(",", "").strip()
+        return float(clean_val)
     except:
         return 0.0
 
@@ -325,8 +327,7 @@ def discover_corvus_catalog():
                     "weight_unit": "g",
                     "upc": "",
                     "price": "0.00",
-                    "compare_at_price": None,
-                    "release_date": None
+                    "compare_at_price": None
                 })
     except Exception as e:
         print(f"    [ERROR] Corvus Discovery: {e}", flush=True)
@@ -435,6 +436,7 @@ def get_visible_sheet_values(sheet_url):
 #           SCRAPING / RESOLVING
 # ==========================================
 
+# NOTE: This function is preserved but no longer blocks logic
 def scrape_asmodee_status(sku):
     search_url = f"https://store.asmodee.com/search?q={sku}&type=product"
     try:
@@ -629,7 +631,7 @@ def create_shopify_product_shell(product_data, release_date=None):
         return None, None, None
 
 def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRAMS', price="0.00", compare_at=None):
-    """ STEP 2: Update Variant Data """
+    """ STEP 2: Update Variant Data (Exposed Error Handling) """
     if DRY_RUN or not variant_id: return
 
     shopify_unit = "GRAMS"
@@ -647,20 +649,27 @@ def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRA
     }
     """
     
+    # Safe float compare for Compare At Price
+    price_val = safe_float(price)
+    compare_val = safe_float(compare_at)
+    
+    # Ensure strict string format for GraphQL money "12.50"
+    price_str = f"{price_val:.2f}"
+    
     gql_input = {
         "id": variant_id,
         "sku": sku,
         "inventoryManagement": "SHOPIFY", 
         "inventoryPolicy": "DENY",
         "taxable": True,
-        "price": str(price),
+        "price": price_str, # Use the string variable
         "barcode": upc or "",
         "weight": float(weight),
         "weightUnit": shopify_unit
     }
     
-    if compare_at and float(compare_at) > float(price):
-        gql_input["compareAtPrice"] = str(compare_at)
+    if compare_val > price_val:
+        gql_input["compareAtPrice"] = f"{compare_val:.2f}"
 
     url = get_shopify_url() 
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
@@ -671,7 +680,7 @@ def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRA
         if data.get('data', {}).get('productVariantUpdate', {}).get('userErrors'):
              print(f"    [!] Variant Update Error for {sku}: {data['data']['productVariantUpdate']['userErrors']}", flush=True)
         else:
-             print(f"    [SUCCESS] Updated Variant {sku}", flush=True)
+             print(f"    [SUCCESS] Updated Variant {sku}", flush=True) # Confirm success
         time.sleep(0.5) 
     except Exception as e:
         print(f"    [CRITICAL] Variant Update Crash for {sku}: {e}", flush=True)
@@ -716,24 +725,22 @@ def update_product_metafields(product_id, game_name, faction="", release_date=No
     }
     """
     
-    # 1. Game Name (LIST)
     fields = [
         {
             "ownerId": product_id,
             "namespace": "custom",
             "key": "game_name",
-            "type": "list.single_line_text_field",
+            "type": "list.single_line_text_field", # LIST
             "value": json.dumps([game_name])
         }
     ]
     
-    # 2. Primary Faction (SINGLE)
     if faction:
         fields.append({
             "ownerId": product_id,
             "namespace": "custom",
             "key": "primary_faction",
-            "type": "single_line_text_field",
+            "type": "single_line_text_field", # SINGLE
             "value": faction
         })
 
@@ -882,6 +889,13 @@ def main():
                     idx_title = get_col_index(headers, "Title")
                     idx_img = get_col_index(headers, "POS Images")
                     idx_pdf = get_col_index(headers, "Sell Sheet")
+                    
+                    # DYNAMIC PRICE/WEIGHT/GTIN COLUMNS
+                    idx_price = get_col_index(headers, "Variant Price")
+                    idx_compare = get_col_index(headers, "Variant Compare At Price")
+                    idx_weight = get_col_index(headers, "Variant Grams")
+                    idx_barcode = get_col_index(headers, "Variant Barcode")
+                    
                     for row in all_values[h_idx+1:]:
                         if len(row) <= idx_sku: continue
                         sku = str(row[idx_sku]).strip()
@@ -889,6 +903,12 @@ def main():
                         if any(sku.startswith(p) for p in ASMODEE_PREFIXES):
                             raw_link = str(row[idx_img]) if idx_img != -1 else ""
                             resolved_images = get_asmodee_image_links(raw_link)
+                            
+                            # Extract Data or Default
+                            price_val = row[idx_price] if idx_price != -1 and len(row) > idx_price else "0.00"
+                            compare_val = row[idx_compare] if idx_compare != -1 and len(row) > idx_compare else None
+                            weight_val = row[idx_weight] if idx_weight != -1 and len(row) > idx_weight else 0
+                            barcode_val = row[idx_barcode] if idx_barcode != -1 and len(row) > idx_barcode else ""
                             
                             game_name = determine_game_name_asmodee(sku)
                             
@@ -899,12 +919,13 @@ def main():
                                 "game_name": game_name,
                                 "images_source": resolved_images,
                                 "pdf": row[idx_pdf], 
-                                "active_status": True, # FORCE TRUE from Sheet
+                                "active_status": True, 
                                 "description": "",
-                                "weight": 0,
+                                "weight": weight_val,
                                 "weight_unit": "g",
-                                "price": "0.00",
-                                "compare_at_price": None,
+                                "price": price_val,
+                                "compare_at_price": compare_val,
+                                "upc": barcode_val,
                                 "primary_faction": "",
                                 "release_date": None
                             })
@@ -945,7 +966,6 @@ def main():
         if (skips_count + successful_drafts_count) % 50 == 0:
             print(f"Processing... (Skips: {skips_count} | Success: {successful_drafts_count})", flush=True)
 
-        # FORCE TRUE since items are sourced from valid catalogs/sheets
         is_avail = True 
 
         source_images = item.get('images_source', [])
@@ -984,7 +1004,7 @@ def main():
                 if inventory_item_id and DELTONA_LOCATION_ID:
                     activate_inventory_at_location(inventory_item_id, DELTONA_LOCATION_ID)
                 
-                # 3. Set Metafields (Game Name + Faction + Release)
+                # 3. Set Metafields (Game Name + Faction)
                 if item.get('game_name'):
                     update_product_metafields(
                         prod_id, 
