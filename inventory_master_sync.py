@@ -33,14 +33,14 @@ from googleapiclient.discovery import build
 
 # --- CONFIGURATION & SECRETS ---
 DRY_RUN = False        
-TEST_MODE = True       
+TEST_MODE = False       
 TEST_LIMIT = 20        
-RESET_IGNORED_ITEMS = True
+RESET_IGNORED_ITEMS = False
 
 # --- TESTING FLAGS ---
 ENABLE_MOONSTONE = True
 ENABLE_INFINITY = True  
-ENABLE_ASMODEE = False
+ENABLE_ASMODEE = True
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 REPO_NAME = os.getenv('REPO_NAME')
