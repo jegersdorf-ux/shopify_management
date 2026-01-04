@@ -31,6 +31,7 @@ GOOGLE_CREDENTIALS_BASE64 = os.getenv('GOOGLE_CREDENTIALS_BASE64')
 
 SHOPIFY_STORE_URL = os.getenv('SHOPIFY_STORE_URL')
 SHOPIFY_ACCESS_TOKEN = os.getenv('SHOPIFY_ACCESS_TOKEN')
+SHOPIFY_API_VERSION = "2024-10" # Updated to a valid, supported version
 
 EMAIL_SENDER = os.getenv('EMAIL_SENDER')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
@@ -65,6 +66,15 @@ def log_action(action_type, sku, details):
     entry = f"| {action_type} | **{sku}** | {details} |"
     print(f"[DRY RUN] {entry}")
     dry_run_logs.append(entry)
+
+# ==========================================
+#           SHOPIFY HELPER (UPDATED)
+# ==========================================
+def get_shopify_url():
+    if not SHOPIFY_STORE_URL: return None
+    # Clean URL to ensure no double https://
+    clean_url = SHOPIFY_STORE_URL.replace("https://", "").replace("http://", "").strip("/")
+    return f"https://{clean_url}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
 
 # ==========================================
 #           GOOGLE API HELPERS
@@ -318,11 +328,11 @@ def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
         }
     }
     
-    if not SHOPIFY_STORE_URL or not SHOPIFY_ACCESS_TOKEN: 
+    url = get_shopify_url() # Use the robust URL generator
+    if not url or not SHOPIFY_ACCESS_TOKEN:
         print("    [!] Missing Credentials")
         return None
-        
-    url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-10/graphql.json"
+
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
     
     try:
@@ -335,19 +345,21 @@ def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
             print(f"    [SUCCESS] Created Draft: {data['data']['productCreate']['product']['id']}")
             return data['data']['productCreate']['product']['id']
         else:
-            print(f"    [!] Shopify API Error: {r.text}")
+            print(f"    [!] Shopify API Error {r.status_code}: {r.text}")
             return None
     except Exception as e:
         print(f"    [!] Connect Error: {e}")
         return None
 
 def check_shopify_status(sku):
-    if not SHOPIFY_STORE_URL or not SHOPIFY_ACCESS_TOKEN: return None
+    url = get_shopify_url()
+    if not url or not SHOPIFY_ACCESS_TOKEN: return None
+
     query = """query($query: String!) { products(first: 1, query: $query) { edges { node { id, status, tags, variants(first:1) { edges { node { sku } } } } } } }"""
-    url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-10/graphql.json"
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
-    r = requests.post(url, json={"query": query, "variables": {"query": f"sku:{sku}"}}, headers=headers)
+    
     try:
+        r = requests.post(url, json={"query": query, "variables": {"query": f"sku:{sku}"}}, headers=headers)
         node = r.json()['data']['products']['edges'][0]['node']
         if node['variants']['edges'][0]['node']['sku'] == sku:
             return {"id": node['id'], "status": node['status'], "tags": node['tags']}
@@ -356,8 +368,8 @@ def check_shopify_status(sku):
 
 def add_tag(shopify_id, tag, sku):
     if DRY_RUN: return
+    url = get_shopify_url()
     mutation = """mutation tagsAdd($id: ID!, $tags: [String!]!) { tagsAdd(id: $id, tags: $tags) { node { id } } }"""
-    url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-10/graphql.json"
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
     requests.post(url, json={"query": mutation, "variables": {"id": shopify_id, "tags": [tag]}}, headers=headers)
 
@@ -456,7 +468,6 @@ def main():
         sku = item['sku']
         vendor = item['vendor']
         
-        # Verbose progress check
         if (skips_count + successful_drafts_count) % 50 == 0:
             print(f"Processing... (Skips: {skips_count} | Success: {successful_drafts_count})")
 
@@ -475,7 +486,6 @@ def main():
                 skips_count += 1
                 continue
             
-            # --- MODIFIED RULE: NO IMAGE = SKIP ONLY FOR ASMODEE ---
             if vendor == "Asmodee" and not source_images:
                 print(f"    [SKIP] Asmodee Item {sku} has no images.")
                 new_entry = {
@@ -488,7 +498,6 @@ def main():
                 updates_made = True
                 skips_count += 1
                 continue
-            # -----------------------------------------------------
 
             print(f"   > Uploading {sku}...")
             cloud_urls = process_and_upload_images(sku, source_images)
@@ -503,7 +512,7 @@ def main():
                 inventory_map[sku] = new_entry
                 new_items_added.append(new_entry)
                 updates_made = True
-                successful_drafts_count += 1 # <--- INCREMENT SUCCESS ONLY HERE
+                successful_drafts_count += 1 
             else:
                  print(f"   [FAIL] Shopify upload failed for {sku}")
                  skips_count += 1
@@ -515,7 +524,6 @@ def main():
 
         else:
             skips_count += 1
-            # Existing Item Check
             has_images = existing_product.get('cloudinary_images') or existing_product.get('cloudinary_url')
             if (not has_images) and source_images:
                 cloud_urls = process_and_upload_images(sku, source_images)
