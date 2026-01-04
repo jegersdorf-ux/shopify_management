@@ -31,7 +31,7 @@ GOOGLE_CREDENTIALS_BASE64 = os.getenv('GOOGLE_CREDENTIALS_BASE64')
 
 SHOPIFY_STORE_URL = os.getenv('SHOPIFY_STORE_URL')
 SHOPIFY_ACCESS_TOKEN = os.getenv('SHOPIFY_ACCESS_TOKEN')
-SHOPIFY_API_VERSION = "2025-10" # Stable Fallback
+SHOPIFY_API_VERSION = "2025-10" # Stable Version
 
 EMAIL_SENDER = os.getenv('EMAIL_SENDER')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
@@ -67,32 +67,36 @@ def log_action(action_type, sku, details):
     dry_run_logs.append(entry)
 
 # ==========================================
-#           SHOPIFY HELPER (AGGRESSIVE FIX)
+#           SHOPIFY HELPER (DIAGNOSTIC)
 # ==========================================
 def get_shopify_url():
     if not SHOPIFY_STORE_URL: return None
     
-    # 1. Remove protocol
-    clean_url = SHOPIFY_STORE_URL.replace("https://", "").replace("http://", "")
+    # Aggressive cleaning
+    clean_url = SHOPIFY_STORE_URL.strip()
+    clean_url = clean_url.replace("https://", "").replace("http://", "")
     
-    # 2. Extract ONLY the domain (everything before the first slash)
-    # This fixes issues if the secret is "store.com/admin"
+    # If user pasted "store.myshopify.com/admin", strip the /admin
     if "/" in clean_url:
         clean_url = clean_url.split("/")[0]
         
-    clean_url = clean_url.strip()
-    
     return f"https://{clean_url}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
 
 def test_shopify_connection():
     print("\n--- TESTING SHOPIFY CONNECTION ---")
     url = get_shopify_url()
-    # print(f"Target: {url}") # Masking for security in logs
     
-    if "myshopify.com" not in url:
-        print("[WARNING] Your SHOPIFY_STORE_URL does not appear to be a 'myshopify.com' domain.")
-        print("          API calls usually fail on custom domains (e.g. www.yoursite.com).")
-        print("          Please use: your-handle.myshopify.com")
+    # REVEAL DOMAIN FOR DEBUGGING (Safe, not the token)
+    domain_part = url.split("//")[1].split("/")[0] if url else "None"
+    print(f"Target Domain: {domain_part}") 
+    print(f"Full Endpoint: {url}")
+    
+    if "myshopify.com" not in domain_part:
+        print("\n[!!!] WARNING: You are not using a '.myshopify.com' domain.")
+        print(f"      You are using: '{domain_part}'")
+        print("      Shopify API calls usually FAIL on custom domains.")
+        print("      Please update your Github Secret 'SHOPIFY_STORE_URL' to your internal handle.")
+        print("      Example: 'extra-turn-games.myshopify.com'\n")
 
     query = "{ shop { name, myshopifyDomain } }"
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
@@ -552,7 +556,7 @@ def main():
                 inventory_map[sku] = new_entry
                 new_items_added.append(new_entry)
                 updates_made = True
-                successful_drafts_count += 1 
+                successful_drafts_count += 1 # <--- INCREMENT SUCCESS ONLY HERE
             else:
                  print(f"   [FAIL] Shopify upload failed for {sku}")
                  skips_count += 1
