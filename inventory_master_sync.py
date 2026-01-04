@@ -65,20 +65,28 @@ def log_action(action_type, sku, details):
     dry_run_logs.append(entry)
 
 # ==========================================
-#           GOOGLE DRIVE "TREE WALKER"
+#           GOOGLE API HELPERS
 # ==========================================
-def get_drive_service():
+def get_credentials():
     if not GOOGLE_CREDENTIALS_BASE64: return None
     try:
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(
+        return ServiceAccountCredentials.from_json_keyfile_dict(
             json.loads(base64.b64decode(GOOGLE_CREDENTIALS_BASE64).decode()), 
-            ["https://www.googleapis.com/auth/drive"]
+            ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         )
-        return build('drive', 'v3', credentials=creds)
     except: return None
 
+def get_drive_service():
+    creds = get_credentials()
+    if not creds: return None
+    return build('drive', 'v3', credentials=creds)
+
+def get_sheets_service():
+    creds = get_credentials()
+    if not creds: return None
+    return build('sheets', 'v4', credentials=creds)
+
 def extract_drive_id(url):
-    """Finds ID from a Drive URL"""
     if not url or "drive.google.com" not in url: return None
     match = re.search(r'folders/([a-zA-Z0-9_-]+)', url)
     if match: return match.group(1)
@@ -87,70 +95,94 @@ def extract_drive_id(url):
     return None
 
 def walk_drive_folder(service, folder_id):
-    """
-    Recursively searches a folder and its subfolders for ALL images.
-    Returns a list of webContentLinks.
-    """
     found_images = []
     page_token = None
-
     while True:
         try:
-            # Query for items in this folder
             query = f"'{folder_id}' in parents and trashed = false"
             results = service.files().list(
-                q=query, 
-                pageSize=1000, 
+                q=query, pageSize=1000, 
                 fields="nextPageToken, files(id, name, mimeType, webContentLink)",
                 pageToken=page_token
             ).execute()
-            
             items = results.get('files', [])
-            
             for item in items:
-                # If Image -> Add to list
                 if 'image/' in item['mimeType']:
-                    link = item.get('webContentLink')
-                    if link: found_images.append(link)
-                
-                # If Folder -> RECURSE
+                    if item.get('webContentLink'): found_images.append(item['webContentLink'])
                 elif item['mimeType'] == 'application/vnd.google-apps.folder':
-                    print(f"      > Digging into subfolder: {item['name']}...")
                     found_images.extend(walk_drive_folder(service, item['id']))
-            
             page_token = results.get('nextPageToken')
             if not page_token: break
-            
-        except Exception as e:
-            print(f"      [!] Drive Walk Error: {e}")
-            break
-            
+        except: break
     return found_images
 
 def get_asmodee_image_links(url):
-    """
-    Smart wrapper: Handles direct links AND folders.
-    """
     if not url: return []
-    
     folder_id = extract_drive_id(url)
     if folder_id:
         print(f"    > Walking Drive Folder ID: {folder_id}...")
         service = get_drive_service()
-        if service:
-            images = walk_drive_folder(service, folder_id)
-            print(f"      > Found {len(images)} images in Drive structure.")
-            return images
-    
-    # If not a folder, assume it's a direct single image link
+        if service: return walk_drive_folder(service, folder_id)
     return [url]
+
+def get_visible_sheet_values(sheet_url):
+    """
+    Fetches ONLY rows that are NOT hidden in the Google Sheet.
+    """
+    # 1. Parse Sheet ID from URL
+    # URL format: .../d/SPREADSHEET_ID/edit...
+    match = re.search(r'/d/([a-zA-Z0-9-_]+)', sheet_url)
+    if not match: 
+        print("    [!] Could not parse Spreadsheet ID.")
+        return []
+    spreadsheet_id = match.group(1)
+    
+    # 2. Get Data + Metadata
+    service = get_sheets_service()
+    if not service: return []
+    
+    try:
+        # Fetch data AND row metadata (to check 'hiddenByUser')
+        # We assume the first sheet (gid=0 or index 0)
+        spreadsheet = service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            includeGridData=True
+        ).execute()
+        
+        sheet = spreadsheet['sheets'][0] # First tab
+        rows = sheet['data'][0].get('rowData', [])
+        
+        visible_rows = []
+        for row in rows:
+            # Check for hidden property
+            user_hidden = row.get('rowMetadata', {}).get('hiddenByUser', False)
+            filter_hidden = row.get('rowMetadata', {}).get('hiddenByFilter', False)
+            
+            if user_hidden or filter_hidden:
+                continue # Skip this row
+            
+            # Extract cell values
+            values = []
+            if 'values' in row:
+                for cell in row['values']:
+                    # Prioritize userEnteredValue (raw) or formattedValue
+                    val = cell.get('userEnteredValue', {})
+                    text = val.get('stringValue', str(val.get('numberValue', '')))
+                    values.append(text)
+            visible_rows.append(values)
+            
+        return visible_rows
+
+    except Exception as e:
+        print(f"    [!] Sheet API Error: {e}")
+        return []
 
 # ==========================================
 #           CATALOG DISCOVERY
 # ==========================================
 
 def discover_shopify_catalog(store_url, vendor_name):
-    print(f"  > Discovering {vendor_name} Catalog (Full Gallery)...")
+    print(f"  > Discovering {vendor_name} Catalog...")
     base_url = f"{store_url}/products.json"
     page = 1
     found_items = []
@@ -159,8 +191,7 @@ def discover_shopify_catalog(store_url, vendor_name):
         try:
             r = requests.get(f"{base_url}?limit=250&page={page}")
             if r.status_code != 200: break
-            data = r.json()
-            products = data.get('products', [])
+            products = r.json().get('products', [])
             if not products: break
             
             for p in products:
@@ -169,22 +200,16 @@ def discover_shopify_catalog(store_url, vendor_name):
                 sku = variant.get('sku')
                 if not sku: continue
                 
-                # GRAB ALL IMAGES
                 images = [img['src'] for img in p.get('images', [])]
                 
                 found_items.append({
                     "sku": sku, "title": p['title'], "vendor": vendor_name,
-                    "images_source": images, # LIST of URLs
-                    "pdf": "", "upc": variant.get('barcode'),
-                    "active_status": variant.get('available', True),
-                    "release_date": None
+                    "images_source": images, "pdf": "", "upc": variant.get('barcode'),
+                    "active_status": variant.get('available', True), "release_date": None
                 })
-            
-            print(f"    - Page {page}: Found {len(products)} items...")
             page += 1
             time.sleep(0.5)
         except: break
-            
     return found_items
 
 def discover_corvus_catalog():
@@ -195,10 +220,10 @@ def discover_corvus_catalog():
         r = requests.get(sitemap_url)
         if r.status_code == 200:
             urls = re.findall(r'<loc>(.*?)</loc>', r.text)
-            product_urls = [u for u in urls if '/products/' in u or '/wargames/' in u or '/boardgames/' in u]
-            product_urls = [u for u in product_urls if not u.endswith('/wargames') and not u.endswith('/boardgames')]
+            p_urls = [u for u in urls if '/products/' in u or '/wargames/' in u or '/boardgames/' in u]
+            p_urls = [u for u in p_urls if not u.endswith('/wargames') and not u.endswith('/boardgames')]
             
-            for url in product_urls:
+            for url in p_urls:
                 slug = url.split('/')[-1]
                 found_items.append({
                     "sku": f"CB_LOOKUP_{slug}", "title": slug.replace('-', ' ').title(),
@@ -226,42 +251,27 @@ def scrape_asmodee_status(sku):
     except: return False
 
 def resolve_corvus_skeleton(item):
-    """Visits Corvus URL to find real SKU and ALL Images."""
     url = item['url']
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         r = requests.get(url, headers=headers)
         soup = BeautifulSoup(r.text, 'html.parser')
-        
         sku = None
         ref_match = re.search(r'Ref:\s*([A-Za-z0-9\-]+)', soup.get_text())
         if ref_match: sku = ref_match.group(1)
-        
         if sku:
             item['sku'] = sku
             h1 = soup.find('h1')
             if h1: item['title'] = h1.get_text().strip()
             
-            # --- GET ALL IMAGES ---
-            # Corvus uses standard img tags usually. We filter for large assets.
             images = []
-            
-            # 1. OG Image (High Qual)
             og_img = soup.find("meta", property="og:image")
             if og_img: images.append(og_img['content'])
-            
-            # 2. Gallery Images
-            # Look for all images that contain 'assets.corvusbelli.net'
             for img in soup.find_all('img'):
                 src = img.get('src') or img.get('data-src')
-                if src and 'assets.corvusbelli' in src:
-                    # Filter out small icons/logos
-                    if not any(x in src for x in ['icon', 'logo', 'banner', 'avatar']):
-                        images.append(src)
-            
-            # Deduplicate
+                if src and 'assets.corvusbelli' in src and not any(x in src for x in ['icon', 'logo']):
+                    images.append(src)
             item['images_source'] = list(set(images))
-            
             item['active_status'] = "add to cart" in soup.get_text().lower()
             item['is_skeleton'] = False
             return item
@@ -288,33 +298,13 @@ def send_email(subject, body_html):
         server.quit()
     except: pass
 
-def get_google_sheet_client():
-    if not GOOGLE_CREDENTIALS_BASE64: return None
-    try:
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(
-            json.loads(base64.b64decode(GOOGLE_CREDENTIALS_BASE64).decode()), 
-            ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        )
-        return gspread.authorize(creds)
-    except: return None
-
 def process_and_upload_images(sku, source_urls):
-    """
-    Takes a LIST of source URLs. Uploads them all.
-    Returns a LIST of secure Cloudinary URLs.
-    """
     if not source_urls: return []
     uploaded_urls = []
-    
-    print(f"    > Processing {len(source_urls)} images for {sku}...")
-
-    # Deduplicate source list
-    source_urls = list(set(source_urls))
+    source_urls = list(set(source_urls)) # Dedup
 
     for i, url in enumerate(source_urls):
         if not url or "http" not in url: continue
-        
-        # Naming: SKU, SKU_1, SKU_2...
         suffix = f"_{i}" if i > 0 else ""
         clean_sku = "".join(x for x in sku if x.isalnum() or x in "-_")
         public_id = f"{CLOUDINARY_ROOT_FOLDER}/{clean_sku}{suffix}"
@@ -323,14 +313,10 @@ def process_and_upload_images(sku, source_urls):
             log_action("CLOUDINARY", sku, f"Upload {public_id}")
             uploaded_urls.append("https://res.cloudinary.com/demo/image.jpg")
             continue
-            
         try:
-            # Overwrite=True ensures we always have the latest, but we check existence in main loop
             res = cloudinary.uploader.upload(url, public_id=public_id, overwrite=True)
             uploaded_urls.append(res['secure_url'])
-        except Exception as e:
-            print(f"      [!] Upload Error ({i}): {e}")
-
+        except: pass
     return uploaded_urls
 
 def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
@@ -340,9 +326,6 @@ def create_shopify_draft(product_data, image_urls, release_date=None, upc=None):
     
     tags = ["Review Needed", "New Auto-Import", product_data['vendor']]
     if release_date: tags.append(f"Release: {release_date}")
-    
-    # Construct Image List for GraphQL
-    # images: [{src: "url1"}, {src: "url2"}]
     gql_images = [{"src": url} for url in image_urls]
 
     mutation = """mutation productCreate($input: ProductInput!) { productCreate(input: $input) { product { id } } }"""
@@ -417,43 +400,42 @@ def main():
     inventory_map = {item.get('sku'): item for item in inventory_data}
     print(f"Loaded {len(inventory_map)} existing items.")
 
-    # 2. DISCOVER CATALOGS (Self-Healing)
     moonstone_items = discover_shopify_catalog("https://shop.moonstonethegame.com", "Moonstone")
     warsenal_items = discover_shopify_catalog("https://warsen.al", "Warsenal")
     corvus_skeletons = discover_corvus_catalog()
     
-    # 3. LOAD ASMODEE (Google Sheet)
+    # 3. LOAD ASMODEE (VISIBLE ROWS ONLY)
     asmodee_items = []
     try:
-        client = get_google_sheet_client()
-        sheet = client.open_by_url(SHEET_URL).sheet1
-        all_values = sheet.get_all_values()
+        print("Connecting to Google Sheet (Filtering Hidden Rows)...")
+        all_values = get_visible_sheet_values(SHEET_URL)
         
-        h_idx = -1
-        for i, row in enumerate(all_values[:5]):
-            if any('sku' in str(c).lower() for c in row): h_idx = i; break
-            
-        if h_idx != -1:
-            headers = all_values[h_idx]
-            idx_sku = get_col_index(headers, "SKU")
-            idx_title = get_col_index(headers, "Title")
-            idx_img = get_col_index(headers, "POS Images")
-            idx_pdf = get_col_index(headers, "Sell Sheet")
-            
-            for row in all_values[h_idx+1:]:
-                if len(row) <= idx_sku: continue
-                sku = str(row[idx_sku]).strip()
-                if not sku: continue
-                if any(sku.startswith(p) for p in ASMODEE_PREFIXES):
-                    # For Asmodee, we resolve links/folders immediately here so we can pass list to processor
-                    raw_link = str(row[idx_img]) if idx_img != -1 else ""
-                    resolved_images = get_asmodee_image_links(raw_link)
-                    
-                    asmodee_items.append({
-                        "sku": sku, "title": row[idx_title], "vendor": "Asmodee",
-                        "images_source": resolved_images, # LIST
-                        "pdf": row[idx_pdf], "active_status": None 
-                    })
+        if all_values:
+            h_idx = -1
+            for i, row in enumerate(all_values[:5]):
+                if any('sku' in str(c).lower() for c in row): h_idx = i; break
+                
+            if h_idx != -1:
+                headers = all_values[h_idx]
+                idx_sku = get_col_index(headers, "SKU")
+                idx_title = get_col_index(headers, "Title")
+                idx_img = get_col_index(headers, "POS Images")
+                idx_pdf = get_col_index(headers, "Sell Sheet")
+                
+                for row in all_values[h_idx+1:]:
+                    if len(row) <= idx_sku: continue
+                    sku = str(row[idx_sku]).strip()
+                    if not sku: continue
+                    if any(sku.startswith(p) for p in ASMODEE_PREFIXES):
+                        # Recursive Folder Scan for images
+                        raw_link = str(row[idx_img]) if idx_img != -1 else ""
+                        resolved_images = get_asmodee_image_links(raw_link)
+                        
+                        asmodee_items.append({
+                            "sku": sku, "title": row[idx_title], "vendor": "Asmodee",
+                            "images_source": resolved_images,
+                            "pdf": row[idx_pdf], "active_status": None 
+                        })
     except Exception as e: print(f"Sheet Error: {e}")
 
     # 4. MERGE
@@ -485,19 +467,13 @@ def main():
         existing_product = inventory_map.get(sku)
         source_images = item.get('images_source', [])
 
-        # --- NEW ITEM ---
         if not existing_product:
             if not is_avail: continue
-
-            # UPLOAD ALL IMAGES
             cloud_urls = process_and_upload_images(sku, source_images)
-            
             shopify_id = create_shopify_draft(item, cloud_urls, item.get('release_date'), item.get('upc'))
-            
             new_entry = {
                 "sku": sku, "title": item['title'], "vendor": vendor,
-                "cloudinary_images": cloud_urls, # LIST
-                "shopify_id": shopify_id,
+                "cloudinary_images": cloud_urls, "shopify_id": shopify_id,
                 "release_date": item.get('release_date'), "upc": item.get('upc')
             }
             inventory_map[sku] = new_entry
@@ -509,12 +485,8 @@ def main():
                 prompt = f"PROMPT FOR {sku}: {item['title']} (Vendor: {vendor})\n{txt[:1000]}"
                 prompts_to_generate.append(prompt)
 
-        # --- EXISTING ITEM ---
         else:
-            # Check if we need to sync images (Flag check)
-            # If inventory says we have images, we skip unless FORCE is on.
             has_images = existing_product.get('cloudinary_images') or existing_product.get('cloudinary_url')
-            
             if (not has_images) and source_images:
                 cloud_urls = process_and_upload_images(sku, source_images)
                 if cloud_urls:
@@ -527,7 +499,6 @@ def main():
                     add_tag(s_data['id'], "Review Needed", sku)
                     active_conflicts.append(existing_product)
 
-    # --- SAVE ---
     if new_items_added: send_email(f"Import: {len(new_items_added)} New", "Check Shopify.")
     if active_conflicts: send_email(f"ALERT: {len(active_conflicts)} Conflicts", "Check Shopify.")
 
@@ -540,7 +511,6 @@ def main():
         print("Saving JSON...")
         try: repo.update_file(JSON_FILE_PATH, "Sync", json.dumps(list(inventory_map.values()), indent=2), repo.get_contents(JSON_FILE_PATH).sha)
         except: repo.create_file(JSON_FILE_PATH, "Sync", json.dumps(list(inventory_map.values()), indent=2))
-        
         if prompts_to_generate:
              full_prompt = "\n".join(prompts_to_generate)
              try: repo.update_file(PROMPTS_FILE_PATH, "Prompts", full_prompt, repo.get_contents(PROMPTS_FILE_PATH).sha)
