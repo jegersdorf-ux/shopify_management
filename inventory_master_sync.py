@@ -24,7 +24,7 @@ from googleapiclient.discovery import build
 
 # --- CONFIGURATION & SECRETS ---
 DRY_RUN = False        
-TEST_MODE = True       
+TEST_MODE = False       
 TEST_LIMIT = 20        
 RESET_IGNORED_ITEMS = False
 
