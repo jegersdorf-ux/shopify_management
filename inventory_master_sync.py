@@ -128,49 +128,65 @@ def get_asmodee_image_links(url):
 def get_visible_sheet_values(sheet_url):
     """
     Fetches ONLY rows that are NOT hidden in the Google Sheet.
+    Respects GID (Tab ID) from URL.
     """
-    # 1. Parse Sheet ID from URL
-    # URL format: .../d/SPREADSHEET_ID/edit...
-    match = re.search(r'/d/([a-zA-Z0-9-_]+)', sheet_url)
-    if not match: 
-        print("    [!] Could not parse Spreadsheet ID.")
-        return []
-    spreadsheet_id = match.group(1)
+    # 1. Parse Spreadsheet ID and GID
+    match_id = re.search(r'/d/([a-zA-Z0-9-_]+)', sheet_url)
+    if not match_id: return []
+    spreadsheet_id = match_id.group(1)
     
-    # 2. Get Data + Metadata
+    # Default GID is 0 (first tab), unless specified in URL
+    target_gid = 0
+    match_gid = re.search(r'[#&]gid=([0-9]+)', sheet_url)
+    if match_gid:
+        target_gid = int(match_gid.group(1))
+
     service = get_sheets_service()
     if not service: return []
     
     try:
-        # Fetch data AND row metadata (to check 'hiddenByUser')
-        # We assume the first sheet (gid=0 or index 0)
+        # Fetch data with metadata
         spreadsheet = service.spreadsheets().get(
             spreadsheetId=spreadsheet_id,
             includeGridData=True
         ).execute()
         
-        sheet = spreadsheet['sheets'][0] # First tab
-        rows = sheet['data'][0].get('rowData', [])
+        # Find the correct sheet by GID
+        target_sheet = None
+        for s in spreadsheet['sheets']:
+            if s['properties']['sheetId'] == target_gid:
+                target_sheet = s
+                break
         
+        if not target_sheet:
+            print(f"    [!] Could not find tab with GID {target_gid}")
+            return []
+
+        print(f"    > Reading Tab: {target_sheet['properties']['title']} (GID: {target_gid})")
+        
+        rows = target_sheet['data'][0].get('rowData', [])
         visible_rows = []
+        hidden_count = 0
+        
         for row in rows:
-            # Check for hidden property
+            # Check Metadata for hiding
             user_hidden = row.get('rowMetadata', {}).get('hiddenByUser', False)
             filter_hidden = row.get('rowMetadata', {}).get('hiddenByFilter', False)
             
             if user_hidden or filter_hidden:
-                continue # Skip this row
+                hidden_count += 1
+                continue 
             
             # Extract cell values
             values = []
             if 'values' in row:
                 for cell in row['values']:
-                    # Prioritize userEnteredValue (raw) or formattedValue
                     val = cell.get('userEnteredValue', {})
                     text = val.get('stringValue', str(val.get('numberValue', '')))
                     values.append(text)
             visible_rows.append(values)
             
+        print(f"    > Loaded {len(visible_rows)} visible rows (Skipped {hidden_count} hidden).")
         return visible_rows
 
     except Exception as e:
