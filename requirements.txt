@@ -4,3 +4,4 @@ gspread
 oauth2client
 cloudinary
 pdfplumber
+beautifulsoup4
