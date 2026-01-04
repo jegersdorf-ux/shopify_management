@@ -11,6 +11,7 @@ import io
 import re
 import time
 import warnings
+import traceback
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -26,7 +27,12 @@ from googleapiclient.discovery import build
 DRY_RUN = False        
 TEST_MODE = True       
 TEST_LIMIT = 20        
-RESET_IGNORED_ITEMS = True
+RESET_IGNORED_ITEMS = False
+
+# --- TESTING FLAGS ---
+ENABLE_MOONSTONE = True
+ENABLE_INFINITY = True  
+ENABLE_ASMODEE = False
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 REPO_NAME = os.getenv('REPO_NAME')
@@ -186,23 +192,26 @@ def determine_vendor(source_vendor, game_name):
     return source_vendor
 
 def determine_faction(game_name, source_tags, source_url=""):
-    """Derives faction from Tags (Moonstone/Warsenal) or URL (Corvus)"""
     key = "moonstone" if "Moonstone" in game_name else "infinity"
     
-    # 1. Check URL for Corvus
     if "corvus" in str(source_url):
         for f in KNOWN_FACTIONS.get('infinity', []):
             if f.lower().replace(" ", "-") in source_url.lower():
                 return f
     
-    # 2. Check Tags
     if source_tags:
         tags_str = " ".join(source_tags).lower()
         for f in KNOWN_FACTIONS.get(key, []):
             if f.lower() in tags_str:
                 return f
                 
-    return "" # No faction found
+    return "" 
+
+def clean_html_for_seo(html_content):
+    """Simple stripper for SEO Description"""
+    if not html_content: return ""
+    clean = re.sub('<[^<]+?>', '', html_content)
+    return clean[:300] # Limit length
 
 # ==========================================
 #           CATALOG DISCOVERY
@@ -213,14 +222,17 @@ def discover_shopify_catalog(store_url, source_label):
     base_url = f"{store_url}/products.json"
     page = 1
     found_items = []
-    
     game_name = "Moonstone" if "Moonstone" in source_label else "Infinity"
     
     while True:
         try:
             if page % 5 == 0: print(f"    ...scanning page {page}...", flush=True)
             r = requests.get(f"{base_url}?limit=250&page={page}", timeout=15)
-            if r.status_code != 200: break
+            
+            if r.status_code != 200:
+                print(f"    [WARN] Failed to fetch {source_label} page {page}. Status: {r.status_code}", flush=True)
+                break
+                
             products = r.json().get('products', [])
             if not products: break
             
@@ -237,13 +249,10 @@ def discover_shopify_catalog(store_url, source_label):
                 
                 final_vendor = determine_vendor(source_vendor, game_name)
                 final_title = format_title_prefix(p.get('title', ''), game_name)
-                
-                # Faction Logic
                 faction = determine_faction(game_name, source_tags)
 
                 base_price = variant.get('compare_at_price')
                 sell_price = variant.get('price', '0.00')
-                final_price = base_price if (base_price and float(base_price) > 0) else sell_price
 
                 found_items.append({
                     "sku": sku, 
@@ -257,14 +266,18 @@ def discover_shopify_catalog(store_url, source_label):
                     "upc": variant.get('barcode', ''),
                     "weight": variant.get('weight', 0),
                     "weight_unit": variant.get('weight_unit', 'g'),
-                    "price": price,
+                    "price": sell_price,
                     "compare_at_price": base_price,
                     "active_status": variant.get('available', True), 
                     "release_date": None
                 })
             page += 1
             time.sleep(0.5)
-        except: break
+        except Exception as e:
+            print(f"    [CRITICAL ERROR] in {source_label} discovery on page {page}: {e}", flush=True)
+            traceback.print_exc()
+            break
+            
     return found_items
 
 def discover_corvus_catalog():
@@ -281,8 +294,6 @@ def discover_corvus_catalog():
             for url in p_urls:
                 slug = url.split('/')[-1]
                 raw_title = slug.replace('-', ' ').title()
-                
-                # Derive faction from URL
                 faction = determine_faction("Infinity", [], url)
 
                 found_items.append({
@@ -302,7 +313,8 @@ def discover_corvus_catalog():
                     "price": "0.00",
                     "compare_at_price": None
                 })
-    except: pass
+    except Exception as e:
+        print(f"    [ERROR] Corvus Discovery: {e}", flush=True)
     return found_items
 
 # ==========================================
@@ -400,21 +412,23 @@ def get_visible_sheet_values(sheet_url):
                     values.append(text)
             visible_rows.append(values)
         return visible_rows
-    except: return []
+    except Exception as e:
+        print(f"    [ERROR] Reading Sheet: {e}", flush=True)
+        return []
 
 # ==========================================
 #           SCRAPING / RESOLVING
 # ==========================================
 
+# NOTE: This function is preserved but no longer blocks logic
 def scrape_asmodee_status(sku):
     search_url = f"https://store.asmodee.com/search?q={sku}&type=product"
-    if DRY_RUN: return True
     try:
         r = requests.get(search_url, timeout=10)
+        if r.status_code != 200: return False
         soup = BeautifulSoup(r.text, 'html.parser')
         link = soup.find('a', href=re.compile(r'/products/'))
         if not link: return False 
-        
         r2 = requests.get("https://store.asmodee.com" + link['href'], timeout=10)
         text = BeautifulSoup(r2.text, 'html.parser').get_text().lower()
         return "add to cart" in text and "sold out" not in text
@@ -548,13 +562,21 @@ def create_shopify_product_shell(product_data, release_date=None):
     tags = ["Review Needed", "New Auto-Import", product_data['vendor']]
     if release_date: tags.append(f"Release: {release_date}")
 
+    # Generate SEO data from title and description
+    seo_title = product_data['title']
+    seo_description = clean_html_for_seo(product_data.get('description', ''))
+
     gql_input = {
         "title": product_data['title'],
         "status": "DRAFT",
         "vendor": product_data['vendor'],
         "productType": "Dice Sets & Games", 
         "tags": tags,
-        "descriptionHtml": product_data.get('description') or (f"<p>Release: {release_date}</p>" if release_date else "")
+        "descriptionHtml": product_data.get('description') or (f"<p>Release: {release_date}</p>" if release_date else ""),
+        "seo": {
+            "title": seo_title,
+            "description": seo_description
+        }
     }
 
     mutation = """
@@ -616,7 +638,7 @@ def update_default_variant(variant_id, sku, upc=None, weight=0, weight_unit='GRA
         "sku": sku,
         "inventoryManagement": "SHOPIFY", 
         "inventoryPolicy": "DENY",
-        "taxable": True, # Explicitly TRUE as requested
+        "taxable": True,
         "price": str(price),
         "barcode": upc or "",
         "weight": float(weight),
@@ -654,6 +676,7 @@ def activate_inventory_at_location(inventory_item_id, location_id):
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
     
     try:
+        # Set initial stock to 0 but activate the location
         r = requests.post(url, json={"query": mutation, "variables": {"inventoryItemId": inventory_item_id, "locationId": location_id, "available": 0}}, headers=headers, timeout=20)
         data = r.json()
         if data.get('data', {}).get('inventoryActivate', {}).get('userErrors'):
@@ -805,50 +828,57 @@ def main():
     inventory_map = {item.get('sku'): item for item in inventory_data}
     print(f"Loaded {len(inventory_map)} existing items.", flush=True)
 
-    moonstone_items = discover_shopify_catalog("https://shop.moonstonethegame.com", "Moonstone")
-    warsenal_items = discover_shopify_catalog("https://warsen.al", "Warsenal")
-    corvus_skeletons = discover_corvus_catalog()
+    moonstone_items = []
+    if ENABLE_MOONSTONE:
+        moonstone_items = discover_shopify_catalog("https://shop.moonstonethegame.com", "Moonstone")
+
+    warsenal_items = []
+    corvus_skeletons = []
+    if ENABLE_INFINITY:
+        warsenal_items = discover_shopify_catalog("https://warsen.al", "Warsenal")
+        corvus_skeletons = discover_corvus_catalog()
     
     asmodee_items = []
-    try:
-        print("Connecting to Google Sheet (Filtering Hidden Rows)...", flush=True)
-        all_values = get_visible_sheet_values(SHEET_URL)
-        if all_values:
-            h_idx = -1
-            for i, row in enumerate(all_values[:5]):
-                if any('sku' in str(c).lower() for c in row): h_idx = i; break
-            if h_idx != -1:
-                headers = all_values[h_idx]
-                idx_sku = get_col_index(headers, "SKU")
-                idx_title = get_col_index(headers, "Title")
-                idx_img = get_col_index(headers, "POS Images")
-                idx_pdf = get_col_index(headers, "Sell Sheet")
-                for row in all_values[h_idx+1:]:
-                    if len(row) <= idx_sku: continue
-                    sku = str(row[idx_sku]).strip()
-                    if not sku: continue
-                    if any(sku.startswith(p) for p in ASMODEE_PREFIXES):
-                        raw_link = str(row[idx_img]) if idx_img != -1 else ""
-                        resolved_images = get_asmodee_image_links(raw_link)
-                        
-                        game_name = determine_game_name_asmodee(sku)
-                        
-                        asmodee_items.append({
-                            "sku": sku, 
-                            "title": row[idx_title], 
-                            "vendor": "Asmodee",
-                            "game_name": game_name,
-                            "images_source": resolved_images,
-                            "pdf": row[idx_pdf], 
-                            "active_status": None,
-                            "description": "",
-                            "weight": 0,
-                            "weight_unit": "g",
-                            "price": "0.00",
-                            "compare_at_price": None,
-                            "primary_faction": ""
-                        })
-    except Exception as e: print(f"Sheet Error: {e}", flush=True)
+    if ENABLE_ASMODEE:
+        try:
+            print("Connecting to Google Sheet (Filtering Hidden Rows)...", flush=True)
+            all_values = get_visible_sheet_values(SHEET_URL)
+            if all_values:
+                h_idx = -1
+                for i, row in enumerate(all_values[:5]):
+                    if any('sku' in str(c).lower() for c in row): h_idx = i; break
+                if h_idx != -1:
+                    headers = all_values[h_idx]
+                    idx_sku = get_col_index(headers, "SKU")
+                    idx_title = get_col_index(headers, "Title")
+                    idx_img = get_col_index(headers, "POS Images")
+                    idx_pdf = get_col_index(headers, "Sell Sheet")
+                    for row in all_values[h_idx+1:]:
+                        if len(row) <= idx_sku: continue
+                        sku = str(row[idx_sku]).strip()
+                        if not sku: continue
+                        if any(sku.startswith(p) for p in ASMODEE_PREFIXES):
+                            raw_link = str(row[idx_img]) if idx_img != -1 else ""
+                            resolved_images = get_asmodee_image_links(raw_link)
+                            
+                            game_name = determine_game_name_asmodee(sku)
+                            
+                            asmodee_items.append({
+                                "sku": sku, 
+                                "title": row[idx_title], 
+                                "vendor": "Asmodee",
+                                "game_name": game_name,
+                                "images_source": resolved_images,
+                                "pdf": row[idx_pdf], 
+                                "active_status": True, # FORCE TRUE from Sheet
+                                "description": "",
+                                "weight": 0,
+                                "weight_unit": "g",
+                                "price": "0.00",
+                                "compare_at_price": None,
+                                "primary_faction": ""
+                            })
+        except Exception as e: print(f"Sheet Error: {e}", flush=True)
 
     all_rows = asmodee_items + moonstone_items + warsenal_items + corvus_skeletons
     print(f"Total Combined Queue: {len(all_rows)} items", flush=True)
@@ -885,11 +915,8 @@ def main():
         if (skips_count + successful_drafts_count) % 50 == 0:
             print(f"Processing... (Skips: {skips_count} | Success: {successful_drafts_count})", flush=True)
 
-        is_avail = True
-        if vendor == "Asmodee":
-            is_avail = scrape_asmodee_status(sku)
-        else:
-            is_avail = item.get('active_status', True)
+        # FORCE TRUE since items are sourced from valid catalogs/sheets
+        is_avail = True 
 
         source_images = item.get('images_source', [])
 
@@ -898,23 +925,11 @@ def main():
                 skips_count += 1
                 continue
             
+            # --- ASMODEE-ONLY BLOCK ---
             if vendor == "Asmodee" and not source_images:
-                if not is_avail:
-                    print(f"    [DEAD] Asmodee Item {sku} has no images AND is not found. Marking Ignored.", flush=True)
-                    new_entry = {
-                        "sku": sku, "title": item['title'], "vendor": vendor,
-                        "cloudinary_images": [], "shopify_id": None,
-                        "shopify_status": "PERMANENTLY_IGNORED", 
-                        "release_date": item.get('release_date'), "upc": item.get('upc')
-                    }
-                    inventory_map[sku] = new_entry
-                    updates_made = True
-                    skips_count += 1
-                    continue
-                else:
-                    print(f"    [SKIP] Asmodee Item {sku} has no images but is active. Skipping.", flush=True)
-                    skips_count += 1
-                    continue
+                print(f"    [SKIP] Asmodee Item {sku} has no images. Skipping.", flush=True)
+                skips_count += 1
+                continue
 
             print(f"   > Uploading {sku}...", flush=True)
             cloud_urls = process_and_upload_images(sku, source_images, vendor)
