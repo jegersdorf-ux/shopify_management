@@ -26,7 +26,7 @@ from googleapiclient.discovery import build
 DRY_RUN = False        
 TEST_MODE = True       
 TEST_LIMIT = 20        
-RESET_IGNORED_ITEMS = False
+RESET_IGNORED_ITEMS = True
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 REPO_NAME = os.getenv('REPO_NAME')
