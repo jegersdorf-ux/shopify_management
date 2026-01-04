@@ -1,0 +1,31 @@
+name: Inspect Shopify Sources
+
+on:
+  workflow_dispatch:  # Manual trigger button
+
+jobs:
+  inspect-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Requests
+        run: pip install requests
+
+      - name: Run Inspector Script
+        run: python source_inspector.py
+
+      - name: Upload Raw JSON Data
+        uses: actions/upload-artifact@v4
+        with:
+          name: shopify-source-data
+          path: |
+            raw_export_moonstone.json
+            raw_export_warsenal.json
