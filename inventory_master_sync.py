@@ -5,10 +5,9 @@ import requests
 import time
 import sys
 import warnings
-import re
 from datetime import datetime
 
-# --- PYTHON 3.9 COMPATIBILITY PATCH ---
+# --- PYTHON 3.9 COMPATIBILITY ---
 if sys.version_info < (3, 10):
     import importlib.metadata
     if not hasattr(importlib.metadata, 'packages_distributions'):
@@ -38,17 +37,15 @@ SHOPIFY_ACCESS_TOKEN = os.getenv('SHOPIFY_ACCESS_TOKEN')
 SHOPIFY_API_VERSION = "2025-10" 
 GOOGLE_CREDENTIALS_BASE64 = os.getenv('GOOGLE_CREDENTIALS_BASE64')
 
-# Source Resources
+# Resources
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1OFpCuFatmI0YAfVGRcqkfLJbfa-2NL9gReQFqkORhtw/edit"
 SOURCE_FILES = ["raw_export_moonstone.json", "raw_export_warsenal.json"]
 
-# Headers for REST API
 HEADERS = {
     "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
     "Content-Type": "application/json"
 }
 
-# --- FACTION & VENDOR LOGIC ---
 KNOWN_FACTIONS = {
     "infinity": ["PanOceania", "Yu Jing", "Ariadna", "Haqqislam", "Nomads", "Combined Army", "Aleph", "Tohaa", "O-12", "JSA", "Mercenaries"],
     "moonstone": ["Commonwealth", "Dominion", "Leshavult", "Shades", "Gnomes", "Fairies"]
@@ -76,13 +73,11 @@ def safe_int(val):
     except: return 0
 
 def determine_vendor(source_vendor, game_name):
-    """Preserves your custom vendor logic."""
     if "Moonstone" in game_name: return "Goblin King Games"
     if "Infinity" in game_name: return "Corvus Belli"
     return source_vendor
 
 def determine_faction(game_name, source_tags):
-    """Preserves your custom faction logic."""
     key = "moonstone" if "Moonstone" in game_name else "infinity"
     tags_str = " ".join(source_tags).lower()
     for f in KNOWN_FACTIONS.get(key, []):
@@ -90,14 +85,10 @@ def determine_faction(game_name, source_tags):
     return ""
 
 # ==========================================
-#       PHASE 1: FETCH LIVE CATALOG (REST)
+#       PHASE 1: FETCH LIVE CATALOG
 # ==========================================
 
 def fetch_live_catalog():
-    """
-    Fetches ALL products using REST Link-Header pagination.
-    Captures IDs, Price, Weight, and Vendor for comparison.
-    """
     print("--- PHASE 1: FETCHING LIVE CATALOG (REST) ---")
     catalog = {}
     url = f"{get_shopify_base_url()}/products.json"
@@ -128,20 +119,19 @@ def fetch_live_catalog():
                             "status": p['status'],
                             "tags": p_tags,
                             "vendor": vendor,
-                            "current_price": v.get('price'),
+                            "current_price": safe_float(v.get('price')),
                             "current_compare": v.get('compare_at_price'),
                             "current_weight": v.get('grams', 0),
                             "title": p['title']
                         }
 
-            # Handle Pagination (Link Header Logic)
             link_header = r.headers.get('Link')
             if link_header and 'rel="next"' in link_header:
                 links = link_header.split(',')
                 next_link = [l for l in links if 'rel="next"' in l]
                 if next_link:
                     url = next_link[0].split(';')[0].strip('<> ')
-                    params = {} # Clear params as they are in the URL now
+                    params = {} 
                 else: url = None
             else: url = None
             
@@ -154,20 +144,15 @@ def fetch_live_catalog():
     return catalog
 
 # ==========================================
-#       PHASE 2: LOAD SOURCE DATA
+#       PHASE 2: LOAD SOURCES
 # ==========================================
 
 def get_google_sheet_data():
-    """Fetches Asmodee data from Google Sheets."""
-    if not GOOGLE_CREDENTIALS_BASE64:
-        print("    [!] No Google Credentials found. Skipping Sheet.")
-        return []
-
+    if not GOOGLE_CREDENTIALS_BASE64: return []
     try:
         creds_json = base64.b64decode(GOOGLE_CREDENTIALS_BASE64).decode('utf-8')
-        creds_dict = json.loads(creds_json)
         creds = service_account.Credentials.from_service_account_info(
-            creds_dict, scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
+            json.loads(creds_json), scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
         )
         service = build('sheets', 'v4', credentials=creds)
         sheet_id = SHEET_URL.split("/d/")[1].split("/")[0]
@@ -186,11 +171,9 @@ def load_combined_source_data():
         path = os.path.join(os.getcwd(), filename)
         if not os.path.exists(path): continue
         
-        # Toggles
         if "moonstone" in filename.lower() and not ENABLE_MOONSTONE: continue
         if "warsenal" in filename.lower() and not ENABLE_INFINITY: continue
 
-        # Logic Flags
         game_name = "Moonstone" if "moonstone" in filename.lower() else "Infinity"
         is_warsenal_file = "warsenal" in filename.lower()
         cost_multiplier = 0.60 if "moonstone" in filename.lower() else 0.50
@@ -213,31 +196,34 @@ def load_combined_source_data():
                     
                     price = safe_float(v.get('price'))
                     compare = safe_float(v.get('compare_at_price'))
-                    # Extract Weight from Source JSON
                     weight = safe_int(v.get('grams'))
-                    
+                    barcode = v.get('barcode', '')
                     msrp = max(price, compare)
                     
                     combined[sku.strip()] = {
                         "title": p.get('title'),
+                        "description": p.get('body_html', ''),
+                        "product_type": p.get('product_type', ''),
                         "images": images,
                         "weight": weight,
+                        "barcode": barcode,
                         "target_compare": f"{msrp:.2f}",
+                        "target_price": f"{msrp:.2f}",
                         "target_cost": f"{msrp * cost_multiplier:.2f}",
                         "target_vendor": final_vendor,
                         "target_faction": faction,
-                        "restrict_to_warsenal": is_warsenal_file
+                        "restrict_to_warsenal": is_warsenal_file,
+                        "source": "JSON"
                     }
         except Exception as e:
             print(f"    [!] Error reading {filename}: {e}")
 
-    # 2. PROCESS GOOGLE SHEET (Asmodee)
+    # 2. PROCESS GOOGLE SHEET
     if ENABLE_ASMODEE:
         sheet_rows = get_google_sheet_data()
         if sheet_rows:
             headers = [h.lower() for h in sheet_rows[0]]
             try:
-                # Map columns (Adjust indices if your sheet changes)
                 idx_sku = headers.index('sku') if 'sku' in headers else 0
                 idx_title = headers.index('title') if 'title' in headers else 1
                 idx_price = headers.index('price') if 'price' in headers else 3
@@ -250,19 +236,22 @@ def load_combined_source_data():
                     
                     msrp = safe_float(row[idx_price] if len(row) > idx_price else 0)
                     weight = safe_int(row[idx_weight]) if idx_weight != -1 and len(row) > idx_weight else 0
-                    
-                    # Asmodee Cost Rule: 57%
-                    cost = msrp * 0.57
+                    cost = msrp * 0.57 
                     
                     combined[sku] = {
                         "title": row[idx_title] if len(row) > idx_title else "Unknown",
-                        "images": [], # Sheets usually don't have image lists
+                        "description": "", 
+                        "product_type": "Tabletop Game",
+                        "images": [],
                         "weight": weight,
+                        "barcode": "",
                         "target_compare": f"{msrp:.2f}",
+                        "target_price": f"{msrp:.2f}",
                         "target_cost": f"{cost:.2f}",
                         "target_vendor": "Asmodee",
                         "target_faction": "",
-                        "restrict_to_warsenal": False
+                        "restrict_to_warsenal": False,
+                        "source": "Sheet"
                     }
             except ValueError:
                 print("    [!] Could not map Sheet headers.")
@@ -271,16 +260,68 @@ def load_combined_source_data():
     return combined
 
 # ==========================================
-#       PHASE 3: REST API UPDATE
+#       PHASE 3: CREATE & UPDATE
 # ==========================================
 
+def create_product_rest(target_data, sku):
+    if DRY_RUN:
+        print(f"    [DRY] CREATING {sku} | Vendor: {target_data['target_vendor']}")
+        return
+
+    # Build Tags - UPDATED HERE
+    tags = ["Tabletop Gaming", "Auto Import"] 
+    if target_data['target_faction']: tags.append(target_data['target_faction'])
+    
+    # 1. Create Product
+    url = f"{get_shopify_base_url()}/products.json"
+    payload = {
+        "product": {
+            "title": target_data['title'],
+            "body_html": target_data['description'],
+            "vendor": target_data['target_vendor'],
+            "product_type": target_data['product_type'],
+            "status": "draft",
+            "tags": ", ".join(tags),
+            "variants": [
+                {
+                    "sku": sku,
+                    "price": target_data['target_price'],
+                    "compare_at_price": target_data['target_compare'],
+                    "grams": target_data['weight'],
+                    "barcode": target_data['barcode'],
+                    "inventory_management": "shopify"
+                }
+            ],
+            "images": target_data['images']
+        }
+    }
+    
+    try:
+        r = requests.post(url, json=payload, headers=HEADERS)
+        r.raise_for_status()
+        new_prod = r.json()['product']
+        
+        # 2. Update Cost (Requires separate call)
+        inv_item_id = new_prod['variants'][0]['inventory_item_id']
+        i_url = f"{get_shopify_base_url()}/inventory_items/{inv_item_id}.json"
+        requests.put(i_url, json={"inventory_item": {"id": inv_item_id, "cost": target_data['target_cost']}}, headers=HEADERS)
+        
+        print(f"    [+] CREATED {sku} | Draft | Cost: {target_data['target_cost']}")
+        
+    except Exception as e:
+        print(f"    [!] Error Creating {sku}: {e}")
+
 def update_product_rest(live_data, target_data, sku):
+    # --- SKIP ACTIVE RULE ---
+    # If Product is ACTIVE and has a Price > 0, DO NOT TOUCH IT.
+    if live_data['status'] == 'active' and live_data['current_price'] > 0:
+        return
+
     # --- VENDOR CHECK ---
     if target_data.get('restrict_to_warsenal', False):
         vendor = live_data.get('vendor', '').lower()
         allowed = ["infinity", "warsenal", "corvus belli", "asmodee", "atomic mass", "fantasy flight", "star wars", "marvel"]
         if not any(x in vendor for x in allowed):
-            print(f"    [SKIP] Vendor Mismatch for {sku}: {vendor}")
             return
 
     # --- CHANGE DETECTION ---
@@ -292,71 +333,43 @@ def update_product_rest(live_data, target_data, sku):
     tgt_wgt = int(target_data['weight'])
     weight_changed = (live_wgt != tgt_wgt and tgt_wgt > 0)
 
-    # --- TAGS & STATUS ---
+    # --- TAGS ---
     current_tags = live_data['tags']
-    new_status = live_data['status']
+    # UPDATED TAG LIST HERE
+    tags_to_add = ["Tabletop Gaming", "Auto Import"]
     
-    tags_to_add = ["Tabletop Gaming", "automated price"]
     if target_data['target_faction'] and target_data['target_faction'] not in current_tags:
         tags_to_add.append(target_data['target_faction'])
-    
-    # Active -> Draft Rule
-    if price_changed and live_data['status'] == 'active':
-        new_status = 'draft'
-        tags_to_add.append("price changed")
     
     final_tags = list(set(current_tags + tags_to_add))
     final_tags_str = ", ".join(final_tags)
 
     if DRY_RUN:
-        print(f"    [DRY] {sku} | Cost: {target_data['target_cost']} | Wgt: {tgt_wgt}")
+        print(f"    [DRY] UPDATE {sku} | Cost: {target_data['target_cost']}")
         return
 
     try:
-        # A. UPDATE VARIANT (Price, Weight)
+        # A. Update Variant
         v_url = f"{get_shopify_base_url()}/variants/{live_data['variant_id']}.json"
-        v_payload = {
-            "variant": {
-                "id": live_data['variant_id'],
-                "compare_at_price": target_data['target_compare']
-            }
-        }
-        if weight_changed:
-            v_payload["variant"]["grams"] = tgt_wgt
-            
+        v_payload = {"variant": {"id": live_data['variant_id'], "compare_at_price": target_data['target_compare']}}
+        if weight_changed: v_payload["variant"]["grams"] = tgt_wgt
         requests.put(v_url, json=v_payload, headers=HEADERS)
 
-        # B. UPDATE INVENTORY (Cost)
+        # B. Update Cost
         i_url = f"{get_shopify_base_url()}/inventory_items/{live_data['inventory_item_id']}.json"
-        i_payload = {
-            "inventory_item": {
-                "id": live_data['inventory_item_id'],
-                "cost": target_data['target_cost']
-            }
-        }
-        requests.put(i_url, json=i_payload, headers=HEADERS)
+        requests.put(i_url, json={"inventory_item": {"id": live_data['inventory_item_id'], "cost": target_data['target_cost']}}, headers=HEADERS)
 
-        # C. UPDATE PRODUCT (Status, Tags, Vendor, Images)
+        # C. Update Product
         p_url = f"{get_shopify_base_url()}/products/{live_data['product_id']}.json"
-        p_payload = {
-            "product": {
-                "id": live_data['product_id'],
-                "status": new_status,
-                "tags": final_tags_str
-            }
-        }
+        p_payload = {"product": {"id": live_data['product_id'], "tags": final_tags_str}}
         
-        # Update Vendor if specific logic applies
         if target_data['target_vendor'] and target_data['target_vendor'] != live_data['vendor']:
             p_payload["product"]["vendor"] = target_data['target_vendor']
-
-        # Overwrite Images (Direct URL)
         if target_data['images']:
             p_payload["product"]["images"] = target_data['images']
 
         requests.put(p_url, json=p_payload, headers=HEADERS)
-
-        print(f"    [✓] Synced {sku}: Cost {target_data['target_cost']} | Wgt: {tgt_wgt} | Status: {new_status}")
+        print(f"    [✓] Updated {sku} (Draft)")
 
     except Exception as e:
         print(f"    [!] Error updating {sku}: {e}")
@@ -368,28 +381,26 @@ def update_product_rest(live_data, target_data, sku):
 def main():
     print(f"--- STARTING MASTER SYNC: {datetime.now()} ---")
     
-    # 1. Fetch Live Catalog (REST)
     live_map = fetch_live_catalog()
-    if not live_map:
-        print("Aborting: Could not fetch live catalog.")
-        return
-
-    # 2. Load All Sources
     source_map = load_combined_source_data()
     
-    print(f"\n--- PHASE 3: COMPARING {len(source_map)} SOURCE ITEMS VS {len(live_map)} LIVE ITEMS ---")
+    print(f"\n--- PHASE 3: SYNCING ---")
     
-    matched_count = 0
+    processed_count = 0
     for sku, target in source_map.items():
-        if TEST_MODE and matched_count >= TEST_LIMIT: break
+        if TEST_MODE and processed_count >= TEST_LIMIT: break
             
         if sku in live_map:
-            print(f"> Processing {sku}...")
+            # Update existing (Skipping Active ones)
             update_product_rest(live_map[sku], target, sku)
-            matched_count += 1
-            time.sleep(0.5) 
+        else:
+            # Create new (Always Draft)
+            create_product_rest(target, sku)
             
-    print(f"\n--- SYNC COMPLETE. Processed {matched_count} matches. ---")
+        processed_count += 1
+        time.sleep(0.5) 
+            
+    print(f"\n--- SYNC COMPLETE. Processed {processed_count} items. ---")
 
 if __name__ == "__main__":
     main()
