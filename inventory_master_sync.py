@@ -5,6 +5,7 @@ import requests
 import time
 import sys
 import warnings
+import re
 from datetime import datetime
 
 # --- PYTHON 3.9 COMPATIBILITY ---
@@ -18,6 +19,8 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+# (Preserved your Github import in case you add repo logic later)
+from github import Github, Auth 
 
 # ==========================================
 #              CONFIGURATION
@@ -36,6 +39,8 @@ SHOPIFY_STORE_URL = os.getenv('SHOPIFY_STORE_URL')
 SHOPIFY_ACCESS_TOKEN = os.getenv('SHOPIFY_ACCESS_TOKEN')
 SHOPIFY_API_VERSION = "2025-10" 
 GOOGLE_CREDENTIALS_BASE64 = os.getenv('GOOGLE_CREDENTIALS_BASE64')
+GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
+REPO_NAME = os.getenv('REPO_NAME')
 
 # Resources
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1OFpCuFatmI0YAfVGRcqkfLJbfa-2NL9gReQFqkORhtw/edit"
@@ -61,16 +66,24 @@ def get_shopify_base_url():
     return f"https://{clean_url}/admin/api/{SHOPIFY_API_VERSION}"
 
 def safe_float(val):
+    """Parses prices, handling symbols like '$' and ','."""
     if val is None or val == "": return 0.0
+    clean_str = str(val).replace("$", "").replace("£", "").replace(",", "").strip()
     try:
-        return float(str(val).replace(",", "").strip())
-    except: return 0.0
+        return float(clean_str)
+    except:
+        match = re.search(r"(\d+(\.\d+)?)", clean_str)
+        return float(match.group(1)) if match else 0.0
 
 def safe_int(val):
+    """Parses weights, handling units like 'g' or 'lbs'."""
     if val is None or val == "": return 0
+    clean_str = str(val).lower().replace("g", "").replace("lbs", "").replace(",", "").strip()
     try:
-        return int(float(str(val).replace(",", "").strip()))
-    except: return 0
+        return int(float(clean_str))
+    except:
+        match = re.search(r"(\d+)", clean_str)
+        return int(match.group(1)) if match else 0
 
 def determine_vendor(source_vendor, game_name):
     if "Moonstone" in game_name: return "Goblin King Games"
@@ -85,10 +98,13 @@ def determine_faction(game_name, source_tags):
     return ""
 
 # ==========================================
-#       PHASE 1: FETCH LIVE CATALOG
+#       PHASE 1: BULK FETCH (REST)
 # ==========================================
 
 def fetch_live_catalog():
+    """
+    Downloads the ENTIRE catalog in one efficient loop via REST API.
+    """
     print("--- PHASE 1: FETCHING LIVE CATALOG (REST) ---")
     catalog = {}
     url = f"{get_shopify_base_url()}/products.json"
@@ -125,6 +141,7 @@ def fetch_live_catalog():
                             "title": p['title']
                         }
 
+            # Pagination (Link Header)
             link_header = r.headers.get('Link')
             if link_header and 'rel="next"' in link_header:
                 links = link_header.split(',')
@@ -224,6 +241,7 @@ def load_combined_source_data():
         if sheet_rows:
             headers = [h.lower() for h in sheet_rows[0]]
             try:
+                # Dynamic Column Mapping
                 idx_sku = headers.index('sku') if 'sku' in headers else 0
                 idx_title = headers.index('title') if 'title' in headers else 1
                 idx_price = headers.index('price') if 'price' in headers else 3
@@ -235,7 +253,7 @@ def load_combined_source_data():
                     if not sku: continue
                     
                     msrp = safe_float(row[idx_price] if len(row) > idx_price else 0)
-                    weight = safe_int(row[idx_weight]) if idx_weight != -1 and len(row) > idx_weight else 0
+                    weight = safe_int(row[idx_weight] if idx_weight != -1 and len(row) > idx_weight else 0)
                     cost = msrp * 0.57 
                     
                     combined[sku] = {
@@ -254,7 +272,7 @@ def load_combined_source_data():
                         "source": "Sheet"
                     }
             except ValueError:
-                print("    [!] Could not map Sheet headers.")
+                print("    [!] Could not map Sheet headers. Check columns.")
 
     print(f"    [✓] Loaded {len(combined)} total source items.")
     return combined
@@ -265,14 +283,13 @@ def load_combined_source_data():
 
 def create_product_rest(target_data, sku):
     if DRY_RUN:
-        print(f"    [DRY] CREATING {sku} | Vendor: {target_data['target_vendor']}")
+        print(f"    [DRY] CREATING {sku}")
         return
 
-    # Build Tags - UPDATED HERE
+    # Tags
     tags = ["Tabletop Gaming", "Auto Import"] 
     if target_data['target_faction']: tags.append(target_data['target_faction'])
     
-    # 1. Create Product
     url = f"{get_shopify_base_url()}/products.json"
     payload = {
         "product": {
@@ -301,7 +318,7 @@ def create_product_rest(target_data, sku):
         r.raise_for_status()
         new_prod = r.json()['product']
         
-        # 2. Update Cost (Requires separate call)
+        # Update Cost
         inv_item_id = new_prod['variants'][0]['inventory_item_id']
         i_url = f"{get_shopify_base_url()}/inventory_items/{inv_item_id}.json"
         requests.put(i_url, json={"inventory_item": {"id": inv_item_id, "cost": target_data['target_cost']}}, headers=HEADERS)
@@ -313,7 +330,6 @@ def create_product_rest(target_data, sku):
 
 def update_product_rest(live_data, target_data, sku):
     # --- SKIP ACTIVE RULE ---
-    # If Product is ACTIVE and has a Price > 0, DO NOT TOUCH IT.
     if live_data['status'] == 'active' and live_data['current_price'] > 0:
         return
 
@@ -335,9 +351,7 @@ def update_product_rest(live_data, target_data, sku):
 
     # --- TAGS ---
     current_tags = live_data['tags']
-    # UPDATED TAG LIST HERE
     tags_to_add = ["Tabletop Gaming", "Auto Import"]
-    
     if target_data['target_faction'] and target_data['target_faction'] not in current_tags:
         tags_to_add.append(target_data['target_faction'])
     
@@ -345,11 +359,11 @@ def update_product_rest(live_data, target_data, sku):
     final_tags_str = ", ".join(final_tags)
 
     if DRY_RUN:
-        print(f"    [DRY] UPDATE {sku} | Cost: {target_data['target_cost']}")
+        print(f"    [DRY] UPDATE {sku}")
         return
 
     try:
-        # A. Update Variant
+        # A. Update Variant (Price & Weight)
         v_url = f"{get_shopify_base_url()}/variants/{live_data['variant_id']}.json"
         v_payload = {"variant": {"id": live_data['variant_id'], "compare_at_price": target_data['target_compare']}}
         if weight_changed: v_payload["variant"]["grams"] = tgt_wgt
@@ -359,7 +373,7 @@ def update_product_rest(live_data, target_data, sku):
         i_url = f"{get_shopify_base_url()}/inventory_items/{live_data['inventory_item_id']}.json"
         requests.put(i_url, json={"inventory_item": {"id": live_data['inventory_item_id'], "cost": target_data['target_cost']}}, headers=HEADERS)
 
-        # C. Update Product
+        # C. Update Product (Tags, Vendor, Images)
         p_url = f"{get_shopify_base_url()}/products/{live_data['product_id']}.json"
         p_payload = {"product": {"id": live_data['product_id'], "tags": final_tags_str}}
         
@@ -369,7 +383,7 @@ def update_product_rest(live_data, target_data, sku):
             p_payload["product"]["images"] = target_data['images']
 
         requests.put(p_url, json=p_payload, headers=HEADERS)
-        print(f"    [✓] Updated {sku} (Draft)")
+        print(f"    [✓] Updated {sku}: Cost {target_data['target_cost']} | Wgt: {tgt_wgt}")
 
     except Exception as e:
         print(f"    [!] Error updating {sku}: {e}")
@@ -381,7 +395,13 @@ def update_product_rest(live_data, target_data, sku):
 def main():
     print(f"--- STARTING MASTER SYNC: {datetime.now()} ---")
     
+    # 1. Fetch
     live_map = fetch_live_catalog()
+    if not live_map:
+        print("Aborting: Could not fetch live catalog.")
+        return
+
+    # 2. Load
     source_map = load_combined_source_data()
     
     print(f"\n--- PHASE 3: SYNCING ---")
@@ -391,10 +411,8 @@ def main():
         if TEST_MODE and processed_count >= TEST_LIMIT: break
             
         if sku in live_map:
-            # Update existing (Skipping Active ones)
             update_product_rest(live_map[sku], target, sku)
         else:
-            # Create new (Always Draft)
             create_product_rest(target, sku)
             
         processed_count += 1
