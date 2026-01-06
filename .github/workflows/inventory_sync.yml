@@ -38,3 +38,16 @@ jobs:
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
         run: python inventory_master_sync.py
+
+      - name: Commit and Push Blacklist Updates
+        run: |
+          git config --global user.name 'GitHub Action'
+          git config --global user.email 'action@github.com'
+          # Check if blacklist.json changed
+          if [[ -n $(git status -s blacklist.json) ]]; then
+            git add blacklist.json
+            git commit -m "Auto-update blacklist.json [skip ci]"
+            git push
+          else
+            echo "No changes to blacklist."
+          fi
