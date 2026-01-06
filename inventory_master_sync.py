@@ -239,7 +239,6 @@ def compile_source_data(release_map):
             faction = determine_faction(raw_vendor, title, tags_list)
             game_system = detect_game_system(raw_vendor, name)
             
-            # Date Logic
             r_date = release_map.get(title.lower())
             if not r_date:
                 for k, v in release_map.items():
@@ -292,7 +291,7 @@ def compile_source_data(release_map):
                     sku = row[idx_sku].strip()
                     if not sku or sku in combined: continue 
                     
-                    if not any(sku.upper().startswith(pre) for pre in ASMODEE_PREFIXES): continue # Filter
+                    if not any(sku.upper().startswith(pre) for pre in ASMODEE_PREFIXES): continue 
                     
                     title = row[idx_title] if len(row) > idx_title else "Unknown"
                     msrp = safe_float(row[idx_price] if len(row) > idx_price else "0")
@@ -322,7 +321,6 @@ def compile_source_data(release_map):
     return combined
 
 def group_data_by_title(source_map):
-    """Refactors {sku: data} into {title: [data, data]}"""
     grouped = {}
     for sku, data in source_map.items():
         t = data['title'].strip()
@@ -336,7 +334,7 @@ def group_data_by_title(source_map):
 
 def fetch_live_catalog():
     print("\n--- PHASE 3: FETCHING LIVE SHOPIFY CATALOG ---")
-    live_products_by_title = {} # { "Title": { "id": 123, "image_count": 0, "variants": {"SKU": var_id} } }
+    live_products_by_title = {} 
     
     for status in ["active", "draft", "archived"]:
         print(f"    --> Status: {status.upper()}...")
@@ -353,8 +351,9 @@ def fetch_live_catalog():
                         "status": p['status'],
                         "tags": p['tags'],
                         "vendor": p['vendor'],
+                        "product_type": p['product_type'], # Added for comparison
                         "image_count": len(p.get('images', [])),
-                        "variants": {} # Map SKU -> Data
+                        "variants": {} 
                     }
                     
                     for v in p.get('variants', []):
@@ -382,9 +381,54 @@ def fetch_live_catalog():
 #        PHASE 4: SYNC LOGIC (GROUPED)
 # ==========================================
 
-def sync_product_group(title, variant_list, live_product, location_id):
-    # variant_list = list of data dicts for this title
+def update_automation_notes(product_id, new_notes):
+    """Appends new text lines to the custom.automation_notes list metafield."""
+    if not new_notes: return
     
+    if DRY_RUN:
+        for n in new_notes: print(f"    [DRY] Note for {product_id}: {n}")
+        return
+
+    # 1. Fetch existing
+    existing_notes = []
+    metafield_id = None
+    try:
+        url = f"{get_shopify_base_url()}/products/{product_id}/metafields.json"
+        r = session.get(url, headers=HEADERS)
+        metafields = r.json().get('metafields', [])
+        for m in metafields:
+            if m['namespace'] == 'custom' and m['key'] == 'automation_notes':
+                metafield_id = m['id']
+                try: existing_notes = json.loads(m['value'])
+                except: existing_notes = []
+                break
+    except: pass
+
+    # 2. Combine and Push
+    if not isinstance(existing_notes, list): existing_notes = []
+    combined = existing_notes + new_notes
+    
+    payload = {
+        "metafield": {
+            "namespace": "custom",
+            "key": "automation_notes",
+            "value": json.dumps(combined),
+            "type": "list.single_line_text_field"
+        }
+    }
+    
+    try:
+        if metafield_id:
+            url = f"{get_shopify_base_url()}/products/{product_id}/metafields/{metafield_id}.json"
+            payload['metafield']['id'] = metafield_id
+            session.put(url, json=payload, headers=HEADERS)
+        else:
+            url = f"{get_shopify_base_url()}/products/{product_id}/metafields.json"
+            session.post(url, json=payload, headers=HEADERS)
+    except Exception as e:
+        print(f"    [!] Failed to update notes: {e}")
+
+def sync_product_group(title, variant_list, live_product, location_id):
     # CASE 1: PRODUCT DOES NOT EXIST -> CREATE
     if not live_product:
         if DRY_RUN: print(f"    [DRY] CREATE PRODUCT: {title} ({len(variant_list)} variants)"); return
@@ -448,6 +492,34 @@ def sync_product_group(title, variant_list, live_product, location_id):
         return
 
     # CASE 2: PRODUCT EXISTS
+    
+    # --- COMPARISON LOGIC ---
+    notes_to_add = []
+    ts = datetime.now().strftime('%Y-%m-%d')
+    source_base = variant_list[0]
+    
+    # Compare Vendor
+    if live_product['vendor'] != source_base['target_vendor']:
+        notes_to_add.append(f"[{ts}] Vendor Diff: Live '{live_product['vendor']}' vs Source '{source_base['target_vendor']}'")
+        
+    # Compare Type
+    if live_product['product_type'] != source_base['product_type']:
+        notes_to_add.append(f"[{ts}] Type Diff: Live '{live_product['product_type']}' vs Source '{source_base['product_type']}'")
+        
+    # Compare Prices (Variant Level)
+    for v_data in variant_list:
+        sku = v_data['sku']
+        if sku in live_product['variants']:
+            live_v = live_product['variants'][sku]
+            # Use strict float comparison (assuming standard 2 decimal places)
+            if abs(live_v['price'] - v_data['target_price']) > 0.01:
+                notes_to_add.append(f"[{ts}] Price Diff ({sku}): Live {live_v['price']} vs Source {v_data['target_price']}")
+
+    if notes_to_add:
+        update_automation_notes(live_product['id'], notes_to_add)
+
+    # --- END COMPARISON LOGIC ---
+
     # 2a. Image Injection (If 0 images)
     if live_product['image_count'] == 0 and variant_list[0]['images']:
         print(f"    [+] Injecting Images: {title}")
@@ -458,11 +530,8 @@ def sync_product_group(title, variant_list, live_product, location_id):
                 headers=HEADERS
             )
 
-    # 2b. Sync Variants (Add Missing or Update Existing)
-    
-    # SAFETY CHECK: If images exist, skip standard updates (assume complete)
+    # 2b. Sync Variants
     if live_product['image_count'] > 0:
-        # BUT we still allow Adding Missing Variants
         pass 
     
     for v_data in variant_list:
@@ -471,10 +540,8 @@ def sync_product_group(title, variant_list, live_product, location_id):
         if sku in live_product['variants']:
             live_v = live_product['variants'][sku]
             
-            # Skip existing updates if "Safe" (Images exist)
             if live_product['image_count'] > 0: continue 
             
-            # If "Unsafe" (No images), sync price
             if live_v['compare_at'] != v_data['target_compare']:
                 if not DRY_RUN:
                     session.put(
@@ -523,7 +590,7 @@ def sync_product_group(title, variant_list, live_product, location_id):
 # ==========================================
 
 def main():
-    print(f"--- STARTING UNIVERSAL SYNC V5: {datetime.now()} ---")
+    print(f"--- STARTING UNIVERSAL SYNC V6: {datetime.now()} ---")
     if not ACCESS_TOKEN: return
 
     deltona_id = get_location_id_by_name(TARGET_LOCATION_NAME)
