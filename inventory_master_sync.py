@@ -26,26 +26,21 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # ==========================================
 #              CONFIGURATION
 # ==========================================
-# --- ENVIRONMENT VARIABLES ---
 SHOP_URL = os.environ.get("SHOPIFY_STORE_URL", "the-guillotine-life.myshopify.com")
 ACCESS_TOKEN = os.environ.get("SHOPIFY_ACCESS_TOKEN")
 API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2025-10")
 TARGET_LOCATION_NAME = "Deltona Florida Store"
 
-# Google Config
 SHEET_URL = os.environ.get("SHEET_URL", "https://docs.google.com/spreadsheets/d/1OFpCuFatmI0YAfVGRcqkfLJbfa-2NL9gReQFqkORhtw/edit")
 GOOGLE_CREDS_B64 = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
 
-# --- SCRAPE SOURCES ---
 EXTERNAL_SOURCES = {
     "Moonstone": "https://shop.moonstonethegame.com",
     "Warsenal": "https://warsen.al",
     "Asmodee": "https://store.asmodee.com"
 }
-
 ASMODEE_CALENDAR_URL = "https://store.asmodee.com/pages/release-calendar"
 
-# --- SETTINGS ---
 DRY_RUN = False         
 TEST_MODE = False         
 TEST_LIMIT = 20         
@@ -58,8 +53,6 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-# --- LOGIC LISTS ---
-# Only used for Sheet Filtering now
 ASMODEE_PREFIXES = [
     "CHX", "ESS", "FF", "G2", "GG49", "GG3", "GG2", "GGS2", "NEM", 
     "SWA", "SWC", "SWO", "SWD", "SWF", "SWL", "SWU", "USWA", 
@@ -99,6 +92,17 @@ def create_retry_session(retries=3, backoff_factor=1, status_forcelist=(429, 500
 
 session = create_retry_session()
 
+def update_status_file(current, total):
+    """Writes progress to a local file."""
+    try:
+        percent = (current / total) * 100 if total > 0 else 0
+        with open("sync_progress.txt", "w") as f:
+            f.write(f"Timestamp: {datetime.now()}\n")
+            f.write(f"Status: Running\n")
+            f.write(f"Progress: {current} / {total} Groups Processed ({percent:.1f}%)")
+    except Exception:
+        pass
+
 def safe_float(val):
     if not val: return 0.0
     clean = str(val).replace("$", "").replace("£", "").replace(",", "").strip()
@@ -127,31 +131,25 @@ def extract_sheet_id(url):
 def calculate_cost(msrp, vendor_name, source_name=""):
     v_lower = vendor_name.lower()
     s_lower = source_name.lower()
-    
     if "goblin king" in v_lower or "moonstone" in v_lower or "moonstone" in s_lower:
         return msrp * 0.60
-    
     high_margin_group = ["asmodee", "atomic", "fantasy flight", "star wars", "marvel", "crisis protocol"]
     if "asmodee" in s_lower or any(x in v_lower for x in high_margin_group):
         return msrp * 0.57
-        
     return msrp * 0.50
 
 def auto_detect_vendor(sku, provided_vendor=""):
     if provided_vendor: return provided_vendor
     sku_upper = sku.upper()
     for prefix in ASMODEE_PREFIXES:
-        if sku_upper.startswith(prefix):
-            return "Asmodee"
+        if sku_upper.startswith(prefix): return "Asmodee"
     return "Tabletop Game"
 
 def determine_faction(vendor_raw, title, tags_list=[]):
     search_text = (vendor_raw + " " + title + " " + " ".join(tags_list)).lower()
-    
     if "infinity" in search_text or "corvus" in search_text:
         for f in KNOWN_FACTIONS["infinity"]:
             if f.lower() in search_text: return f
-            
     if "moonstone" in search_text or "goblin king" in search_text:
         for f in KNOWN_FACTIONS["moonstone"]:
             if f.lower() in search_text: return f
@@ -172,508 +170,388 @@ def detect_game_system(vendor_raw, source_name):
 
 def fetch_asmodee_release_calendar():
     print("--- PHASE 0: SCRAPING RELEASE CALENDAR ---")
-    release_map = {} # { "Product Title": "YYYY-MM-DD" }
-    
+    release_map = {} 
     try:
         r = session.get(ASMODEE_CALENDAR_URL, timeout=20)
-        if r.status_code != 200:
-            print(f"    [!] Failed to load calendar: {r.status_code}")
-            return {}
+        if r.status_code != 200: return {}
         
-        html = r.text
-        # Logic: Find Date Headers, then list items until next header
-        # Regex to find dates like "January 30th" or "December 12th"
-        # This is a basic parser. It assumes <h3>Date</h3><ul><li>Product</li></ul> structure often used by Shopify pages.
-        
-        # Split by possible date headers (e.g. <strong>Month Day</strong> or <h3>Month Day</h3>)
-        # We will iterate through lines to be safer
-        
-        lines = html.split('\n')
+        lines = r.text.split('\n')
         current_date_str = None
         current_year = datetime.now().year
         today = datetime.now()
-        
-        month_map = {
-            "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
-            "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12
-        }
+        month_map = {"january":1,"february":2,"march":3,"april":4,"may":5,"june":6,"july":7,"august":8,"september":9,"october":10,"november":11,"december":12}
 
         for line in lines:
-            # 1. Detect Date Header
-            clean_line = re.sub(r'<[^>]+>', '', line).strip() # Remove tags
-            
-            # Match "Month Day" (e.g. January 30th, Dec 12)
+            clean_line = re.sub(r'<[^>]+>', '', line).strip()
             date_match = re.search(r'^([A-Z][a-z]+)\s+(\d+)(st|nd|rd|th)?', clean_line)
             
             if date_match and date_match.group(1).lower() in month_map:
-                month_name = date_match.group(1).lower()
-                day = int(date_match.group(2))
-                month_num = month_map[month_name]
-                
-                # Intelligent Year Guessing
-                # If we are in Dec and see Jan, it's next year.
-                # If we are in Jan and see Dec, it's this year (end of year) or last year?
-                # Usually release calendars are future-focused.
+                month_num = month_map[date_match.group(1).lower()]
                 calc_year = current_year
-                if today.month > 10 and month_num < 3:
-                    calc_year = current_year + 1
-                elif today.month < 3 and month_num > 10:
-                    calc_year = current_year - 1 # Unlikely for a "Release" calendar but possible for archives
-                
-                try:
-                    current_date_str = f"{calc_year}-{month_num:02d}-{day:02d}"
-                    # print(f"    Found Date Group: {current_date_str}")
-                except:
-                    current_date_str = None
+                if today.month > 10 and month_num < 3: calc_year += 1
+                elif today.month < 3 and month_num > 10: calc_year -= 1
+                try: current_date_str = f"{calc_year}-{month_num:02d}-{int(date_match.group(2)):02d}"
+                except: current_date_str = None
                 continue
             
-            # 2. Detect Product (if we have a date)
             if current_date_str and "Add to cart" not in clean_line and len(clean_line) > 5:
-                # Calendar often lists: "- Product Name"
                 if clean_line.startswith("- ") or clean_line.startswith("• "):
-                    prod_title = clean_line[2:].split("$")[0].strip() # Remove Price if present
-                    prod_title = prod_title.split(" - ")[0].strip() # Remove trailing dash descriptions
-                    if prod_title:
-                        release_map[prod_title.lower()] = current_date_str
-                        
+                    prod_title = clean_line[2:].split("$")[0].strip().split(" - ")[0].strip()
+                    if prod_title: release_map[prod_title.lower()] = current_date_str
     except Exception as e:
         print(f"    [!] Error parsing calendar: {e}")
-        
-    print(f"    [✓] Found {len(release_map)} release dates.")
     return release_map
 
 # ==========================================
-#        PHASE 1: SCRAPE EXTERNAL
+#        PHASE 1 & 2: DATA FETCHING
 # ==========================================
 
 def fetch_external_source(source_name, base_url):
-    print(f"    --> Scraping {source_name} ({base_url})...")
+    print(f"    --> Scraping {source_name}...")
     products_found = []
     page = 1
-    
     while True:
         try:
-            url = f"{base_url}/products.json?limit=250&page={page}"
-            r = session.get(url, timeout=20)
+            r = session.get(f"{base_url}/products.json?limit=250&page={page}", timeout=20)
             if r.status_code != 200: break
-                
-            data = r.json()
-            batch = data.get('products', [])
+            batch = r.json().get('products', [])
             if not batch: break 
-                
             products_found.extend(batch)
-            print(f"        Page {page}: Got {len(batch)} items...")
             page += 1
-            time.sleep(1) 
-            
-        except Exception as e:
-            print(f"        [!] Error scraping {source_name}: {e}")
-            break
+            time.sleep(0.5)
+        except: break
     return products_found
 
-def compile_scraped_data(release_map):
-    print("\n--- PHASE 1: COMPILING SCRAPED DATA (All Sources) ---")
-    combined = {}
+def compile_source_data(release_map):
+    print("\n--- PHASE 1 & 2: COMPILING SOURCE DATA ---")
+    combined = {} # Key = SKU
     
+    # 1. Scrape
     for name, url in EXTERNAL_SOURCES.items():
-        if name == "Moonstone" and not ENABLE_MOONSTONE: continue
-        if name == "Warsenal" and not ENABLE_WARSENAL: continue
-        if name == "Asmodee" and not ENABLE_ASMODEE: continue
-        
+        if (name=="Moonstone" and not ENABLE_MOONSTONE) or (name=="Warsenal" and not ENABLE_WARSENAL) or (name=="Asmodee" and not ENABLE_ASMODEE): continue
         raw_products = fetch_external_source(name, url)
         
         for p in raw_products:
             raw_vendor = p.get('vendor', '')
             if name == "Moonstone" and not raw_vendor: raw_vendor = "Goblin King Games"
-            
-            # --- UPDATED: NO FILTERING FOR SCRAPED ASMODEE ---
-            # If it's on the Asmodee site, we take it.
-            
             title = p.get('title', 'Unknown')
-            tags_raw = p.get('tags', [])
-            tags_list = tags_raw.split(',') if isinstance(tags_raw, str) else tags_raw
-            
+            tags_list = str(p.get('tags', [])).split(',')
             faction = determine_faction(raw_vendor, title, tags_list)
             game_system = detect_game_system(raw_vendor, name)
             
-            # Check for Release Date Match
-            release_date = release_map.get(title.lower())
-            # Fallback: check if title is contained in map keys (fuzzy match)
-            if not release_date:
+            # Date Logic
+            r_date = release_map.get(title.lower())
+            if not r_date:
                 for k, v in release_map.items():
-                    if k in title.lower():
-                        release_date = v
-                        break
-            
+                    if k in title.lower(): r_date = v; break
+
             images = [{"src": img['src']} for img in p.get('images', [])]
-            
+
             for v in p.get('variants', []):
                 sku = v.get('sku')
                 if not sku: continue
-                
-                price = safe_float(v.get('price'))
-                compare = safe_float(v.get('compare_at_price'))
-                msrp = max(price, compare)
-                cost = calculate_cost(msrp, raw_vendor, name)
-                weight = safe_int(v.get('grams'))
+                msrp = max(safe_float(v.get('price')), safe_float(v.get('compare_at_price')))
                 
                 combined[sku.strip()] = {
+                    "sku": sku.strip(),
                     "title": title,
                     "description": p.get('body_html', ''),
-                    "product_type": game_system, 
+                    "product_type": game_system,
                     "images": images,
-                    "weight": weight,
+                    "weight": safe_int(v.get('grams')),
                     "barcode": v.get('barcode', ''),
                     "target_compare": msrp,
                     "target_price": msrp,
-                    "target_cost": cost,
+                    "target_cost": calculate_cost(msrp, raw_vendor, name),
                     "target_vendor": raw_vendor,
                     "target_faction": faction,
-                    "release_date": release_date,
-                    "source_origin": f"Scrape-{name}"
+                    "release_date": r_date,
+                    "source_origin": f"Scrape-{name}",
+                    "option1": v.get('option1'), 
+                    "option2": v.get('option2'),
+                    "option3": v.get('option3')
                 }
+
+    # 2. Sheet
+    if GOOGLE_CREDS_B64:
+        print("    --> Fetching Google Sheet...")
+        try:
+            creds = get_google_creds()
+            service = build('sheets', 'v4', credentials=creds)
+            rows = service.spreadsheets().values().get(spreadsheetId=extract_sheet_id(SHEET_URL), range="A:Z").execute().get('values', [])
+            
+            if rows:
+                headers = [h.lower().strip() for h in rows[0]]
+                idx_sku = headers.index('sku')
+                idx_title = headers.index('title')
+                idx_price = headers.index('price')
+                idx_vendor = headers.index('vendor') if 'vendor' in headers else -1
                 
-    print(f"    [✓] Total Unique Scraped Items: {len(combined)}")
+                for row in rows[1:]:
+                    if len(row) <= idx_sku: continue
+                    sku = row[idx_sku].strip()
+                    if not sku or sku in combined: continue 
+                    
+                    if not any(sku.upper().startswith(pre) for pre in ASMODEE_PREFIXES): continue # Filter
+                    
+                    title = row[idx_title] if len(row) > idx_title else "Unknown"
+                    msrp = safe_float(row[idx_price] if len(row) > idx_price else "0")
+                    vendor = row[idx_vendor] if idx_vendor != -1 and len(row) > idx_vendor else ""
+                    final_vendor = auto_detect_vendor(sku, vendor)
+                    
+                    combined[sku] = {
+                        "sku": sku,
+                        "title": title,
+                        "description": "",
+                        "product_type": "Tabletop Game",
+                        "images": [],
+                        "weight": 0,
+                        "barcode": "",
+                        "target_compare": msrp,
+                        "target_price": msrp,
+                        "target_cost": calculate_cost(msrp, final_vendor, "Sheet"),
+                        "target_vendor": final_vendor,
+                        "target_faction": determine_faction(final_vendor, title),
+                        "release_date": None,
+                        "source_origin": "GoogleSheet-Filtered",
+                        "option1": "Default Title", 
+                        "option2": None, "option3": None
+                    }
+        except Exception as e: print(f"    [!] Sheet Error: {e}")
+
     return combined
 
-# ==========================================
-#        PHASE 2: FETCH SHEET (BACKUP)
-# ==========================================
-
-def fetch_sheet_data(existing_skus):
-    print("\n--- PHASE 2: FETCHING GOOGLE SHEET (Filtered Backup) ---")
-    if not GOOGLE_CREDS_B64:
-        print("    [!] No Google Creds found. Skipping Sheet.")
-        return {}
-
-    creds = get_google_creds()
-    try:
-        service = build('sheets', 'v4', credentials=creds)
-        sheet_id = extract_sheet_id(SHEET_URL)
-        result = service.spreadsheets().values().get(spreadsheetId=sheet_id, range="A:Z").execute()
-        rows = result.get('values', [])
-    except Exception as e:
-        print(f"    [!] Error fetching sheet: {e}")
-        return {}
-
-    if not rows: return {}
-
-    headers = [h.lower().strip() for h in rows[0]]
-    sheet_data = {}
-    skipped_count = 0
-    filtered_out_count = 0
-    
-    try:
-        idx_sku = headers.index('sku')
-        idx_title = headers.index('title')
-        idx_price = headers.index('price') 
-        idx_vendor = headers.index('vendor') if 'vendor' in headers else -1
-        idx_barcode = headers.index('barcode') if 'barcode' in headers else -1
-    except ValueError:
-        print("    [!] Critical Header Missing in Sheet (sku, title, price)")
-        return {}
-
-    for row in rows[1:]:
-        if len(row) <= idx_sku: continue
-        
-        sku = row[idx_sku].strip()
-        if not sku: continue
-
-        # 1. SKIP if found in Scrape
-        if sku in existing_skus:
-            skipped_count += 1
-            continue
-            
-        # 2. FILTER: Only accept if it looks like an Asmodee Product (Prefix Match)
-        # We only want "Asmodee Backup" items here.
-        is_asmodee_prefix = any(sku.upper().startswith(pre) for pre in ASMODEE_PREFIXES)
-        
-        # If it's NOT an Asmodee prefix, we check if the Sheet explicitly says "Warsenal" or "Moonstone"
-        # but since those are fully scraped, this is mostly for the generic Asmodee stuff.
-        # If user wants ONLY smart filter for Asmodee on Sheet:
-        if not is_asmodee_prefix:
-            filtered_out_count += 1
-            continue
-        
-        title = row[idx_title] if len(row) > idx_title else "Unknown Item"
-        msrp_raw = row[idx_price] if len(row) > idx_price else "0"
-        vendor_raw = row[idx_vendor] if idx_vendor != -1 and len(row) > idx_vendor else ""
-        barcode = row[idx_barcode] if idx_barcode != -1 and len(row) > idx_barcode else ""
-        
-        msrp = safe_float(msrp_raw)
-        final_vendor = auto_detect_vendor(sku, vendor_raw)
-        cost = calculate_cost(msrp, final_vendor, "Sheet")
-        faction = determine_faction(final_vendor, title)
-        
-        sheet_data[sku] = {
-            "title": title,
-            "description": "", 
-            "product_type": "Tabletop Game",
-            "images": [], 
-            "weight": 0,
-            "barcode": barcode,
-            "target_compare": msrp,
-            "target_price": msrp,
-            "target_cost": cost,
-            "target_vendor": final_vendor,
-            "target_faction": faction,
-            "release_date": None,
-            "source_origin": "GoogleSheet-Filtered"
-        }
-        
-    print(f"    [✓] Sheet Backup Items: {len(sheet_data)}")
-    print(f"    [-] Skipped (Found in Scrape): {skipped_count}")
-    print(f"    [-] Filtered Out (No Prefix Match): {filtered_out_count}")
-    return sheet_data
+def group_data_by_title(source_map):
+    """Refactors {sku: data} into {title: [data, data]}"""
+    grouped = {}
+    for sku, data in source_map.items():
+        t = data['title'].strip()
+        if t not in grouped: grouped[t] = []
+        grouped[t].append(data)
+    return grouped
 
 # ==========================================
-#        PHASE 3: FETCH LIVE CATALOG
+#        PHASE 3: LIVE CATALOG
 # ==========================================
 
 def fetch_live_catalog():
     print("\n--- PHASE 3: FETCHING LIVE SHOPIFY CATALOG ---")
-    catalog = {}
-    statuses = ["active", "draft", "archived"]
+    live_products_by_title = {} # { "Title": { "id": 123, "image_count": 0, "variants": {"SKU": var_id} } }
     
-    for status in statuses:
-        print(f"    --> Fetching Status: {status.upper()}...")
+    for status in ["active", "draft", "archived"]:
+        print(f"    --> Status: {status.upper()}...")
         url = f"{get_shopify_base_url()}/products.json"
         params = {"limit": 250, "status": status}
-
         while url:
             try:
                 r = session.get(url, headers=HEADERS, params=params)
-                r.raise_for_status()
                 data = r.json()
-                
-                products = data.get("products", [])
-                if not products: break
-                
-                for p in products:
+                for p in data.get("products", []):
+                    p_title = p['title'].strip()
+                    p_data = {
+                        "id": p['id'],
+                        "status": p['status'],
+                        "tags": p['tags'],
+                        "vendor": p['vendor'],
+                        "image_count": len(p.get('images', [])),
+                        "variants": {} # Map SKU -> Data
+                    }
+                    
                     for v in p.get('variants', []):
-                        sku = v.get('sku')
+                        sku = v.get('sku', '').strip()
                         if sku:
-                            catalog[sku.strip()] = {
-                                "product_id": p['id'],
-                                "variant_id": v['id'],
+                            p_data["variants"][sku] = {
+                                "id": v['id'],
                                 "inventory_item_id": v['inventory_item_id'],
-                                "status": p['status'],
-                                "tags": p['tags'],
-                                "vendor": p['vendor'],
-                                "current_price": safe_float(v.get('price')),
-                                "current_compare": safe_float(v.get('compare_at_price')),
-                                "title": p['title']
+                                "price": safe_float(v.get('price')),
+                                "compare_at": safe_float(v.get('compare_at_price')),
                             }
+                    
+                    live_products_by_title[p_title] = p_data
 
-                link_header = r.headers.get('Link')
-                url = None
-                if link_header and 'rel="next"' in link_header:
-                    links = link_header.split(',')
-                    next_link = [l for l in links if 'rel="next"' in l]
-                    if next_link:
-                        url = next_link[0].split(';')[0].strip('<> ')
-                        params = {} 
-            except Exception as e:
-                print(f"    [!] Error fetching live catalog ({status}): {e}")
-                break
-            
-    print(f"    [✓] Live Catalog Size: {len(catalog)}")
-    return catalog
-
-def get_location_id_by_name(target_name):
-    try:
-        r = session.get(f"{get_shopify_base_url()}/locations.json", headers=HEADERS)
-        r.raise_for_status()
-        locations = r.json().get('locations', [])
-        for loc in locations:
-            if target_name.lower() in loc['name'].lower():
-                return loc['id']
-    except Exception:
-        pass
-    return None
+                link = r.headers.get('Link')
+                if link and 'rel="next"' in link:
+                    url = [l for l in link.split(',') if 'rel="next"' in l][0].split(';')[0].strip('<> ')
+                    params = {}
+                else: url = None
+            except: break
+    print(f"    [✓] Loaded {len(live_products_by_title)} unique products.")
+    return live_products_by_title
 
 # ==========================================
-#        PHASE 4: SYNC LOGIC
+#        PHASE 4: SYNC LOGIC (GROUPED)
 # ==========================================
 
-def create_product(target_data, sku, location_id):
-    if DRY_RUN:
-        print(f"    [DRY] CREATING {sku} | {target_data['title']}")
-        return
-
-    tags = ["Tabletop Gaming", "Auto Import", f"Source: {target_data['source_origin']}"]
-    if target_data['target_faction']: 
-        tags.append(target_data['target_faction'])
+def sync_product_group(title, variant_list, live_product, location_id):
+    # variant_list = list of data dicts for this title
     
-    # Payload Construction
-    payload = {
-        "product": {
-            "title": target_data['title'],
-            "vendor": target_data['target_vendor'],
-            "product_type": target_data['product_type'],
+    # CASE 1: PRODUCT DOES NOT EXIST -> CREATE
+    if not live_product:
+        if DRY_RUN: print(f"    [DRY] CREATE PRODUCT: {title} ({len(variant_list)} variants)"); return
+
+        base = variant_list[0]
+        tags = ["Tabletop Gaming", "Auto Import", f"Source: {base['source_origin']}"]
+        if base['target_faction']: tags.append(base['target_faction'])
+        
+        variants_payload = []
+        for v in variant_list:
+            variants_payload.append({
+                "sku": v['sku'],
+                "price": f"{v['target_price']:.2f}",
+                "compare_at_price": f"{v['target_compare']:.2f}",
+                "barcode": v['barcode'],
+                "grams": v['weight'],
+                "inventory_management": "shopify",
+                "option1": v['option1'], "option2": v['option2'], "option3": v['option3']
+            })
+
+        prod_payload = {
+            "title": title,
+            "vendor": base['target_vendor'],
+            "product_type": base['product_type'],
             "status": "draft",
             "tags": ", ".join(tags),
-            "variants": [{
-                "sku": sku,
-                "price": f"{target_data['target_price']:.2f}",
-                "compare_at_price": f"{target_data['target_compare']:.2f}",
-                "barcode": target_data['barcode'],
-                "grams": target_data.get('weight', 0),
-                "inventory_management": "shopify"
-            }],
-            # Add Release Date Metafield if present
+            "body_html": base['description'],
+            "images": base['images'],
+            "variants": variants_payload,
             "metafields": []
         }
-    }
-    
-    if target_data['release_date']:
-        payload['product']['metafields'].append({
-            "namespace": "custom",
-            "key": "release_date",
-            "value": target_data['release_date'],
-            "type": "date"
-        })
-
-    if target_data['description']: payload['product']['body_html'] = target_data['description']
-    if target_data['images']: payload['product']['images'] = target_data['images']
-
-    try:
-        r = session.post(f"{get_shopify_base_url()}/products.json", json=payload, headers=HEADERS)
-        r.raise_for_status()
-        new_prod = r.json()['product']
-        inv_item_id = new_prod['variants'][0]['inventory_item_id']
         
-        session.put(
-            f"{get_shopify_base_url()}/inventory_items/{inv_item_id}.json", 
-            json={"inventory_item": {"id": inv_item_id, "cost": f"{target_data['target_cost']:.2f}"}}, 
-            headers=HEADERS
-        )
-        
-        if location_id:
-            session.post(
-                f"{get_shopify_base_url()}/inventory_levels/connect.json",
-                json={"inventory_item_id": inv_item_id, "location_id": location_id, "relocate_if_necessary": True},
-                headers=HEADERS
-            )
+        if base['release_date']:
+            prod_payload['metafields'].append({
+                "namespace": "custom", "key": "release_date", "value": base['release_date'], "type": "date"
+            })
 
-        print(f"    [+] CREATED {sku} (Release: {target_data.get('release_date', 'N/A')})")
-        
-    except Exception as e:
-        print(f"    [!] Error Creating {sku}: {e}")
-
-def update_product(live_data, target_data, sku):
-    # Rule: Skip Active if Price > 0
-    if live_data['status'] == 'active' and live_data['current_price'] > 0:
-        if live_data['current_compare'] != target_data['target_compare']:
-            print(f"    [!] Price Change on ACTIVE item {sku}. Flipping to DRAFT.")
-            if not DRY_RUN:
-                new_tags = live_data['tags'] + ", price changed"
-                session.put(
-                    f"{get_shopify_base_url()}/products/{live_data['product_id']}.json",
-                    json={"product": {"id": live_data['product_id'], "status": "draft", "tags": new_tags}},
-                    headers=HEADERS
-                )
+        try:
+            r = session.post(f"{get_shopify_base_url()}/products.json", json={"product": prod_payload}, headers=HEADERS)
+            r.raise_for_status()
+            new_prod = r.json()['product']
+            
+            # Update Costs
+            for i, created_v in enumerate(new_prod['variants']):
+                source_match = next((x for x in variant_list if x['sku'] == created_v['sku']), None)
+                if source_match:
+                    session.put(
+                        f"{get_shopify_base_url()}/inventory_items/{created_v['inventory_item_id']}.json",
+                        json={"inventory_item": {"id": created_v['inventory_item_id'], "cost": f"{source_match['target_cost']:.2f}"}},
+                        headers=HEADERS
+                    )
+                    if location_id:
+                        session.post(
+                            f"{get_shopify_base_url()}/inventory_levels/connect.json",
+                            json={"inventory_item_id": created_v['inventory_item_id'], "location_id": location_id, "relocate_if_necessary": True},
+                            headers=HEADERS
+                        )
+            print(f"    [+] Created Product: {title} ({len(variant_list)} variants)")
+        except Exception as e:
+            print(f"    [!] Error Creating {title}: {e}")
         return
 
-    # Rule: Vendor Safety
-    live_vendor_lower = live_data['vendor'].lower()
-    is_safe_vendor = any(v in live_vendor_lower for v in SAFE_VENDORS_FOR_UPDATE)
-    if not is_safe_vendor and live_data['vendor'] != "":
-        if "Sheet" in target_data['source_origin']:
-            print(f"    [-] Skipping {sku}: Unsafe Vendor '{live_data['vendor']}'")
-            return
-
-    updates_needed = False
-    tgt_cmp = target_data['target_compare']
-    
-    if live_data['current_compare'] != tgt_cmp:
-        updates_needed = True
-
-    if DRY_RUN:
-        if updates_needed: print(f"    [DRY] UPDATE {sku}")
-        return
-
-    try:
-        if updates_needed:
+    # CASE 2: PRODUCT EXISTS
+    # 2a. Image Injection (If 0 images)
+    if live_product['image_count'] == 0 and variant_list[0]['images']:
+        print(f"    [+] Injecting Images: {title}")
+        if not DRY_RUN:
             session.put(
-                f"{get_shopify_base_url()}/variants/{live_data['variant_id']}.json",
-                json={"variant": {
-                    "id": live_data['variant_id'], 
-                    "price": f"{target_data['target_price']:.2f}",
-                    "compare_at_price": f"{tgt_cmp:.2f}"
-                }}, 
+                f"{get_shopify_base_url()}/products/{live_product['id']}.json",
+                json={"product": {"id": live_product['id'], "images": variant_list[0]['images']}},
                 headers=HEADERS
             )
 
-        session.put(
-            f"{get_shopify_base_url()}/inventory_items/{live_data['inventory_item_id']}.json",
-            json={"inventory_item": {"id": live_data['inventory_item_id'], "cost": f"{target_data['target_cost']:.2f}"}},
-            headers=HEADERS
-        )
+    # 2b. Sync Variants (Add Missing or Update Existing)
+    
+    # SAFETY CHECK: If images exist, skip standard updates (assume complete)
+    if live_product['image_count'] > 0:
+        # BUT we still allow Adding Missing Variants
+        pass 
+    
+    for v_data in variant_list:
+        sku = v_data['sku']
         
-        # Update Metafield (Release Date) if new data found
-        if target_data['release_date']:
-            # We blindly update the release date if we found one
-            session.post(
-                f"{get_shopify_base_url()}/products/{live_data['product_id']}/metafields.json",
-                json={"metafield": {
-                    "namespace": "custom",
-                    "key": "release_date",
-                    "value": target_data['release_date'],
-                    "type": "date"
-                }},
+        if sku in live_product['variants']:
+            live_v = live_product['variants'][sku]
+            
+            # Skip existing updates if "Safe" (Images exist)
+            if live_product['image_count'] > 0: continue 
+            
+            # If "Unsafe" (No images), sync price
+            if live_v['compare_at'] != v_data['target_compare']:
+                if not DRY_RUN:
+                    session.put(
+                        f"{get_shopify_base_url()}/variants/{live_v['id']}.json",
+                        json={"variant": {"id": live_v['id'], "price": f"{v_data['target_price']:.2f}", "compare_at_price": f"{v_data['target_compare']:.2f}"}},
+                        headers=HEADERS
+                    )
+            # Always sync cost
+            session.put(
+                f"{get_shopify_base_url()}/inventory_items/{live_v['inventory_item_id']}.json",
+                json={"inventory_item": {"id": live_v['inventory_item_id'], "cost": f"{v_data['target_cost']:.2f}"}},
                 headers=HEADERS
             )
 
-        if updates_needed: print(f"    [✓] Synced {sku}")
-
-    except Exception as e:
-        print(f"    [!] Error updating {sku}: {e}")
+        else:
+            # Add Missing Variant
+            print(f"    [+] Adding Missing Variant {sku} to existing product {title}...")
+            if not DRY_RUN:
+                var_payload = {
+                    "sku": sku,
+                    "price": f"{v_data['target_price']:.2f}",
+                    "compare_at_price": f"{v_data['target_compare']:.2f}",
+                    "barcode": v_data['barcode'],
+                    "grams": v_data['weight'],
+                    "inventory_management": "shopify",
+                    "option1": v_data['option1'], "option2": v_data['option2'], "option3": v_data['option3']
+                }
+                try:
+                    r = session.post(
+                        f"{get_shopify_base_url()}/products/{live_product['id']}/variants.json",
+                        json={"variant": var_payload},
+                        headers=HEADERS
+                    )
+                    r.raise_for_status()
+                    new_v = r.json()['variant']
+                    session.put(
+                        f"{get_shopify_base_url()}/inventory_items/{new_v['inventory_item_id']}.json",
+                        json={"inventory_item": {"id": new_v['inventory_item_id'], "cost": f"{v_data['target_cost']:.2f}"}},
+                        headers=HEADERS
+                    )
+                except Exception as e:
+                    print(f"       [!] Failed to add variant {sku}: {e}")
 
 # ==========================================
 #              MAIN EXECUTION
 # ==========================================
 
 def main():
-    print(f"--- STARTING UNIVERSAL SYNC V2: {datetime.now()} ---")
-    
-    if not ACCESS_TOKEN:
-        print("    [!] ERROR: Missing SHOPIFY_ACCESS_TOKEN")
-        return
+    print(f"--- STARTING UNIVERSAL SYNC V5: {datetime.now()} ---")
+    if not ACCESS_TOKEN: return
 
     deltona_id = get_location_id_by_name(TARGET_LOCATION_NAME)
     
-    # 0. Get Release Dates
     release_map = fetch_asmodee_release_calendar()
+    source_map_flat = compile_source_data(release_map) 
+    grouped_source = group_data_by_title(source_map_flat)
+    print(f"    [i] Grouped into {len(grouped_source)} unique Titles.")
     
-    # 1. Scrape All (Includes Release Date Injection)
-    scraped_data = compile_scraped_data(release_map)
+    live_products = fetch_live_catalog()
     
-    # 2. Fetch Sheet (Backup - Filtered by Prefix)
-    sheet_data = fetch_sheet_data(scraped_data.keys())
+    print(f"\n--- PHASE 4: EXECUTING UPDATES ---")
     
-    # 3. Merge
-    full_source_map = {**scraped_data, **sheet_data}
+    total_titles = len(grouped_source)
+    processed = 0
     
-    # 4. Fetch Live
-    live_map = fetch_live_catalog()
-    
-    print(f"\n--- PHASE 4: EXECUTING UPDATES ({len(full_source_map)} Items) ---")
-    processed_count = 0
-    
-    for sku, target in full_source_map.items():
-        if TEST_MODE and processed_count >= TEST_LIMIT: 
-            print("--- TEST LIMIT REACHED ---")
-            break
-            
-        if sku in live_map:
-            update_product(live_map[sku], target, sku)
-        else:
-            create_product(target, sku, deltona_id)
-            
-        processed_count += 1
-        time.sleep(0.5) 
+    for title, variants in grouped_source.items():
+        if TEST_MODE and processed >= TEST_LIMIT: break
+        
+        if processed % 5 == 0: update_status_file(processed, total_titles)
+        
+        live_prod = live_products.get(title)
+        sync_product_group(title, variants, live_prod, deltona_id)
+        
+        processed += 1
+        time.sleep(0.5)
 
+    update_status_file(total_titles, total_titles)
     print("\n--- DONE ---")
 
 if __name__ == "__main__":
