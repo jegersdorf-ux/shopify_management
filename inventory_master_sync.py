@@ -6,9 +6,10 @@ import time
 import sys
 import warnings
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from datetime import datetime, timedelta
 
 # --- GOOGLE DEPENDENCIES ---
 from google.oauth2 import service_account
@@ -34,6 +35,8 @@ TARGET_LOCATION_NAME = "Deltona Florida Store"
 SHEET_URL = os.environ.get("SHEET_URL", "https://docs.google.com/spreadsheets/d/1OFpCuFatmI0YAfVGRcqkfLJbfa-2NL9gReQFqkORhtw/edit")
 GOOGLE_CREDS_B64 = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
 
+BLACKLIST_FILE = "blacklist.json"
+
 EXTERNAL_SOURCES = {
     "Moonstone": "https://shop.moonstonethegame.com",
     "Warsenal": "https://warsen.al",
@@ -47,6 +50,8 @@ TEST_LIMIT = 20
 ENABLE_MOONSTONE = True
 ENABLE_WARSENAL = True
 ENABLE_ASMODEE = True
+
+MAX_WORKERS = 4 
 
 HEADERS = {
     "X-Shopify-Access-Token": ACCESS_TOKEN,
@@ -63,11 +68,6 @@ KNOWN_FACTIONS = {
     "infinity": ["PanOceania", "Yu Jing", "Ariadna", "Haqqislam", "Nomads", "Combined Army", "Aleph", "Tohaa", "O-12", "JSA", "Mercenaries"],
     "moonstone": ["Commonwealth", "Dominion", "Leshavult", "Shades", "Gnomes", "Fairies"]
 }
-
-SAFE_VENDORS_FOR_UPDATE = [
-    "infinity", "warsenal", "corvus belli", "asmodee", 
-    "atomic mass", "fantasy flight", "star wars", "marvel"
-]
 
 # ==========================================
 #              HELPER FUNCTIONS
@@ -92,16 +92,12 @@ def create_retry_session(retries=3, backoff_factor=1, status_forcelist=(429, 500
 
 session = create_retry_session()
 
-def update_status_file(current, total):
-    """Writes progress to a local file."""
+def update_status_file(status_text):
     try:
-        percent = (current / total) * 100 if total > 0 else 0
         with open("sync_progress.txt", "w") as f:
             f.write(f"Timestamp: {datetime.now()}\n")
-            f.write(f"Status: Running\n")
-            f.write(f"Progress: {current} / {total} Groups Processed ({percent:.1f}%)")
-    except Exception:
-        pass
+            f.write(f"Status: {status_text}")
+    except: pass
 
 def safe_float(val):
     if not val: return 0.0
@@ -123,6 +119,30 @@ def get_google_creds():
 def extract_sheet_id(url):
     match = re.search(r"/d/([a-zA-Z0-9-_]+)", url)
     return match.group(1) if match else None
+
+# --- BLACKLIST FILE MANAGEMENT ---
+def load_blacklist():
+    """Loads SKUs from local JSON file."""
+    if not os.path.exists(BLACKLIST_FILE):
+        return set()
+    try:
+        with open(BLACKLIST_FILE, 'r') as f:
+            data = json.load(f)
+            return set(data.get('skus', []))
+    except Exception as e:
+        print(f"    [!] Error loading blacklist file: {e}")
+        return set()
+
+def save_blacklist(sku_set):
+    """Saves unique SKUs to local JSON file."""
+    try:
+        # Sort for git consistency
+        sorted_skus = sorted(list(sku_set))
+        with open(BLACKLIST_FILE, 'w') as f:
+            json.dump({"skus": sorted_skus, "last_updated": str(datetime.now())}, f, indent=4)
+        print(f"    [✓] Saved {len(sorted_skus)} entries to {BLACKLIST_FILE}")
+    except Exception as e:
+        print(f"    [!] Error saving blacklist: {e}")
 
 # ==========================================
 #          BUSINESS LOGIC
@@ -222,9 +242,9 @@ def fetch_external_source(source_name, base_url):
         except: break
     return products_found
 
-def compile_source_data(release_map):
+def compile_source_data(release_map, blacklist_set):
     print("\n--- PHASE 1 & 2: COMPILING SOURCE DATA ---")
-    combined = {} # Key = SKU
+    combined = {} 
     
     # 1. Scrape
     for name, url in EXTERNAL_SOURCES.items():
@@ -238,21 +258,21 @@ def compile_source_data(release_map):
             tags_list = str(p.get('tags', [])).split(',')
             faction = determine_faction(raw_vendor, title, tags_list)
             game_system = detect_game_system(raw_vendor, name)
-            
             r_date = release_map.get(title.lower())
-            if not r_date:
-                for k, v in release_map.items():
-                    if k in title.lower(): r_date = v; break
-
             images = [{"src": img['src']} for img in p.get('images', [])]
 
             for v in p.get('variants', []):
-                sku = v.get('sku')
+                sku = v.get('sku', '').strip()
                 if not sku: continue
+                
+                # --- BLACKLIST CHECK (Optimization) ---
+                if sku in blacklist_set:
+                    continue 
+
                 msrp = max(safe_float(v.get('price')), safe_float(v.get('compare_at_price')))
                 
-                combined[sku.strip()] = {
-                    "sku": sku.strip(),
+                combined[sku] = {
+                    "sku": sku,
                     "title": title,
                     "description": p.get('body_html', ''),
                     "product_type": game_system,
@@ -291,6 +311,10 @@ def compile_source_data(release_map):
                     sku = row[idx_sku].strip()
                     if not sku or sku in combined: continue 
                     
+                    # --- BLACKLIST CHECK ---
+                    if sku in blacklist_set:
+                        continue
+
                     if not any(sku.upper().startswith(pre) for pre in ASMODEE_PREFIXES): continue 
                     
                     title = row[idx_title] if len(row) > idx_title else "Unknown"
@@ -329,7 +353,7 @@ def group_data_by_title(source_map):
     return grouped
 
 # ==========================================
-#        PHASE 3: LIVE CATALOG
+#        PHASE 3: LIVE CATALOG & ENRICHMENT
 # ==========================================
 
 def fetch_live_catalog():
@@ -351,7 +375,7 @@ def fetch_live_catalog():
                         "status": p['status'],
                         "tags": p['tags'],
                         "vendor": p['vendor'],
-                        "product_type": p['product_type'], # Added for comparison
+                        "product_type": p['product_type'], 
                         "image_count": len(p.get('images', [])),
                         "variants": {} 
                     }
@@ -365,7 +389,6 @@ def fetch_live_catalog():
                                 "price": safe_float(v.get('price')),
                                 "compare_at": safe_float(v.get('compare_at_price')),
                             }
-                    
                     live_products_by_title[p_title] = p_data
 
                 link = r.headers.get('Link')
@@ -377,19 +400,62 @@ def fetch_live_catalog():
     print(f"    [✓] Loaded {len(live_products_by_title)} unique products.")
     return live_products_by_title
 
+def fetch_skips_worker(product_id):
+    """Worker: Fetches notes for one product ID."""
+    skipped = set()
+    try:
+        url = f"{get_shopify_base_url()}/products/{product_id}/metafields.json"
+        r = session.get(url, headers=HEADERS)
+        metafields = r.json().get('metafields', [])
+        
+        notes_list = []
+        for m in metafields:
+            if m['namespace'] == 'custom' and m['key'] == 'automation_notes':
+                try: notes_list = json.loads(m['value'])
+                except: pass
+                break
+        
+        for note in notes_list:
+            match = re.search(r"Donor SKU\s+(.*?)\.\s+Identical", note)
+            if match:
+                skipped.add(match.group(1).strip())
+    except: pass
+    return product_id, skipped
+
+def enrich_live_products_with_skips(live_products, target_titles, global_blacklist):
+    print("\n--- PHASE 3.5: ENRICHING (Fetching Live Notes) ---")
+    
+    # We only fetch notes for products we are about to touch OR have touched before
+    ids_to_fetch = []
+    for title in target_titles:
+        if title in live_products:
+            ids_to_fetch.append(live_products[title]['id'])
+    
+    print(f"    [i] Checking notes for {len(ids_to_fetch)} products...")
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(fetch_skips_worker, pid): pid for pid in ids_to_fetch}
+        
+        for future in as_completed(futures):
+            pid, skipped_set = future.result()
+            
+            # 1. Update In-Memory Product Data (for immediate use)
+            # 2. Update Global Blacklist (for saving to file later)
+            if skipped_set:
+                global_blacklist.update(skipped_set)
+                
+    print("    [✓] Enrichment Complete.")
+
 # ==========================================
 #        PHASE 4: SYNC LOGIC (GROUPED)
 # ==========================================
 
 def update_automation_notes(product_id, new_notes):
-    """Appends new text lines to the custom.automation_notes list metafield."""
     if not new_notes: return
-    
     if DRY_RUN:
         for n in new_notes: print(f"    [DRY] Note for {product_id}: {n}")
         return
 
-    # 1. Fetch existing
     existing_notes = []
     metafield_id = None
     try:
@@ -404,7 +470,6 @@ def update_automation_notes(product_id, new_notes):
                 break
     except: pass
 
-    # 2. Combine and Push
     if not isinstance(existing_notes, list): existing_notes = []
     combined = existing_notes + new_notes
     
@@ -416,7 +481,6 @@ def update_automation_notes(product_id, new_notes):
             "type": "list.single_line_text_field"
         }
     }
-    
     try:
         if metafield_id:
             url = f"{get_shopify_base_url()}/products/{product_id}/metafields/{metafield_id}.json"
@@ -428,10 +492,10 @@ def update_automation_notes(product_id, new_notes):
     except Exception as e:
         print(f"    [!] Failed to update notes: {e}")
 
-def sync_product_group(title, variant_list, live_product, location_id):
-    # CASE 1: PRODUCT DOES NOT EXIST -> CREATE
+def sync_product_group(title, variant_list, live_product, location_id, global_blacklist):
+    # CASE 1: CREATE
     if not live_product:
-        if DRY_RUN: print(f"    [DRY] CREATE PRODUCT: {title} ({len(variant_list)} variants)"); return
+        if DRY_RUN: print(f"    [DRY] CREATE PRODUCT: {title}"); return
 
         base = variant_list[0]
         tags = ["Tabletop Gaming", "Auto Import", f"Source: {base['source_origin']}"]
@@ -460,7 +524,6 @@ def sync_product_group(title, variant_list, live_product, location_id):
             "variants": variants_payload,
             "metafields": []
         }
-        
         if base['release_date']:
             prod_payload['metafields'].append({
                 "namespace": "custom", "key": "release_date", "value": base['release_date'], "type": "date"
@@ -471,7 +534,6 @@ def sync_product_group(title, variant_list, live_product, location_id):
             r.raise_for_status()
             new_prod = r.json()['product']
             
-            # Update Costs
             for i, created_v in enumerate(new_prod['variants']):
                 source_match = next((x for x in variant_list if x['sku'] == created_v['sku']), None)
                 if source_match:
@@ -486,41 +548,34 @@ def sync_product_group(title, variant_list, live_product, location_id):
                             json={"inventory_item_id": created_v['inventory_item_id'], "location_id": location_id, "relocate_if_necessary": True},
                             headers=HEADERS
                         )
-            print(f"    [+] Created Product: {title} ({len(variant_list)} variants)")
+            print(f"    [+] Created Product: {title}")
         except Exception as e:
             print(f"    [!] Error Creating {title}: {e}")
         return
 
-    # CASE 2: PRODUCT EXISTS
-    
-    # --- COMPARISON LOGIC ---
+    # CASE 2: UPDATE (With In-Memory Global Blacklist)
     notes_to_add = []
     ts = datetime.now().strftime('%Y-%m-%d')
     source_base = variant_list[0]
     
-    # Compare Vendor
     if live_product['vendor'] != source_base['target_vendor']:
         notes_to_add.append(f"[{ts}] Vendor Diff: Live '{live_product['vendor']}' vs Source '{source_base['target_vendor']}'")
-        
-    # Compare Type
     if live_product['product_type'] != source_base['product_type']:
         notes_to_add.append(f"[{ts}] Type Diff: Live '{live_product['product_type']}' vs Source '{source_base['product_type']}'")
         
-    # Compare Prices (Variant Level)
     for v_data in variant_list:
         sku = v_data['sku']
+        if sku in global_blacklist: continue 
+
         if sku in live_product['variants']:
             live_v = live_product['variants'][sku]
-            # Use strict float comparison (assuming standard 2 decimal places)
             if abs(live_v['price'] - v_data['target_price']) > 0.01:
                 notes_to_add.append(f"[{ts}] Price Diff ({sku}): Live {live_v['price']} vs Source {v_data['target_price']}")
 
     if notes_to_add:
         update_automation_notes(live_product['id'], notes_to_add)
 
-    # --- END COMPARISON LOGIC ---
-
-    # 2a. Image Injection (If 0 images)
+    # 2a. Images
     if live_product['image_count'] == 0 and variant_list[0]['images']:
         print(f"    [+] Injecting Images: {title}")
         if not DRY_RUN:
@@ -530,16 +585,16 @@ def sync_product_group(title, variant_list, live_product, location_id):
                 headers=HEADERS
             )
 
-    # 2b. Sync Variants
-    if live_product['image_count'] > 0:
-        pass 
-    
+    # 2b. Variants
     for v_data in variant_list:
         sku = v_data['sku']
         
+        # --- MEMORY SKIP CHECK ---
+        if sku in global_blacklist:
+            continue
+
         if sku in live_product['variants']:
             live_v = live_product['variants'][sku]
-            
             if live_product['image_count'] > 0: continue 
             
             if live_v['compare_at'] != v_data['target_compare']:
@@ -549,15 +604,12 @@ def sync_product_group(title, variant_list, live_product, location_id):
                         json={"variant": {"id": live_v['id'], "price": f"{v_data['target_price']:.2f}", "compare_at_price": f"{v_data['target_compare']:.2f}"}},
                         headers=HEADERS
                     )
-            # Always sync cost
             session.put(
                 f"{get_shopify_base_url()}/inventory_items/{live_v['inventory_item_id']}.json",
                 json={"inventory_item": {"id": live_v['inventory_item_id'], "cost": f"{v_data['target_cost']:.2f}"}},
                 headers=HEADERS
             )
-
         else:
-            # Add Missing Variant
             print(f"    [+] Adding Missing Variant {sku} to existing product {title}...")
             if not DRY_RUN:
                 var_payload = {
@@ -590,17 +642,27 @@ def sync_product_group(title, variant_list, live_product, location_id):
 # ==========================================
 
 def main():
-    print(f"--- STARTING UNIVERSAL SYNC V6: {datetime.now()} ---")
+    print(f"--- STARTING UNIVERSAL SYNC V9: {datetime.now()} ---")
     if not ACCESS_TOKEN: return
 
     deltona_id = get_location_id_by_name(TARGET_LOCATION_NAME)
     
+    # 1. Load Blacklist File (Fast)
+    global_blacklist = load_blacklist()
+    print(f"    [i] Loaded {len(global_blacklist)} SKUs from local blacklist file.")
+
+    # 2. Compile Source (Filtering via Blacklist immediately)
     release_map = fetch_asmodee_release_calendar()
-    source_map_flat = compile_source_data(release_map) 
+    source_map_flat = compile_source_data(release_map, global_blacklist) 
     grouped_source = group_data_by_title(source_map_flat)
     print(f"    [i] Grouped into {len(grouped_source)} unique Titles.")
     
+    # 3. Fetch Live
     live_products = fetch_live_catalog()
+    
+    # 4. Enrich (Double Check Notes on Live Products)
+    # This ensures if we missed anything in the local file, we catch it now.
+    enrich_live_products_with_skips(live_products, grouped_source.keys(), global_blacklist)
     
     print(f"\n--- PHASE 4: EXECUTING UPDATES ---")
     
@@ -610,15 +672,19 @@ def main():
     for title, variants in grouped_source.items():
         if TEST_MODE and processed >= TEST_LIMIT: break
         
-        if processed % 5 == 0: update_status_file(processed, total_titles)
+        if processed % 5 == 0: update_status_file(f"Progress: {processed} / {total_titles} ({int(processed/total_titles*100)}%)")
         
         live_prod = live_products.get(title)
-        sync_product_group(title, variants, live_prod, deltona_id)
+        sync_product_group(title, variants, live_prod, deltona_id, global_blacklist)
         
         processed += 1
         time.sleep(0.5)
 
-    update_status_file(total_titles, total_titles)
+    update_status_file(f"Completed {total_titles} items.")
+    
+    # 5. Save Updated Blacklist
+    save_blacklist(global_blacklist)
+    
     print("\n--- DONE ---")
 
 if __name__ == "__main__":
