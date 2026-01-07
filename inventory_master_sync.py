@@ -6,7 +6,6 @@ import time
 import sys
 import warnings
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -50,8 +49,6 @@ TEST_LIMIT = 20
 ENABLE_MOONSTONE = True
 ENABLE_WARSENAL = True
 ENABLE_ASMODEE = True
-
-MAX_WORKERS = 4 
 
 HEADERS = {
     "X-Shopify-Access-Token": ACCESS_TOKEN,
@@ -122,27 +119,20 @@ def extract_sheet_id(url):
 
 # --- BLACKLIST FILE MANAGEMENT ---
 def load_blacklist():
-    """Loads SKUs from local JSON file."""
-    if not os.path.exists(BLACKLIST_FILE):
-        return set()
+    if not os.path.exists(BLACKLIST_FILE): return set()
     try:
         with open(BLACKLIST_FILE, 'r') as f:
             data = json.load(f)
             return set(data.get('skus', []))
-    except Exception as e:
-        print(f"    [!] Error loading blacklist file: {e}")
-        return set()
+    except: return set()
 
 def save_blacklist(sku_set):
-    """Saves unique SKUs to local JSON file."""
     try:
-        # Sort for git consistency
         sorted_skus = sorted(list(sku_set))
         with open(BLACKLIST_FILE, 'w') as f:
             json.dump({"skus": sorted_skus, "last_updated": str(datetime.now())}, f, indent=4)
         print(f"    [✓] Saved {len(sorted_skus)} entries to {BLACKLIST_FILE}")
-    except Exception as e:
-        print(f"    [!] Error saving blacklist: {e}")
+    except Exception as e: print(f"    [!] Error saving blacklist: {e}")
 
 # ==========================================
 #          BUSINESS LOGIC
@@ -185,16 +175,86 @@ def detect_game_system(vendor_raw, source_name):
     return "Tabletop Game"
 
 # ==========================================
-#        PHASE 0: RELEASE DATES
+#        PHASE 0: PRE-FETCH (GRAPHQL)
 # ==========================================
 
+def fetch_blacklist_from_notes_graphql():
+    """
+    Uses GraphQL to efficiently fetch 'automation_notes' for ALL products
+    and extracts blacklisted SKUs.
+    """
+    print("--- PHASE 0: GRAPHQL BLACKLIST FETCH ---")
+    skipped_skus = set()
+    url = f"https://{SHOP_URL}/admin/api/{API_VERSION}/graphql.json"
+    
+    query = """
+    query ($cursor: String) {
+      products(first: 250, after: $cursor) {
+        pageInfo { hasNextPage, endCursor }
+        edges {
+          node {
+            metafield(namespace: "custom", key: "automation_notes") { value }
+          }
+        }
+      }
+    }
+    """
+    
+    cursor = None
+    has_next = True
+    page_count = 0
+    
+    while has_next:
+        page_count += 1
+        print(f"    --> Fetching Page {page_count} (GraphQL)...", end="\r")
+        
+        try:
+            r = session.post(url, json={"query": query, "variables": {"cursor": cursor}}, headers=HEADERS)
+            if r.status_code != 200:
+                print(f"\n    [!] GraphQL Error: {r.status_code}")
+                break
+                
+            data = r.json()
+            if "errors" in data:
+                print(f"\n    [!] GraphQL Query Error: {data['errors']}")
+                break
+            
+            products_data = data['data']['products']
+            edges = products_data['edges']
+            
+            # Parse this batch
+            for edge in edges:
+                node = edge['node']
+                meta = node.get('metafield')
+                if meta and meta.get('value'):
+                    try:
+                        # Value is a JSON string of a list
+                        notes_list = json.loads(meta['value'])
+                        if isinstance(notes_list, list):
+                            for note in notes_list:
+                                # Regex to find "Donor SKU {SKU}. Identical"
+                                match = re.search(r"Donor SKU\s+(.*?)\.\s+Identical", note)
+                                if match:
+                                    skipped_skus.add(match.group(1).strip())
+                    except: pass
+
+            # Pagination
+            has_next = products_data['pageInfo']['hasNextPage']
+            cursor = products_data['pageInfo']['endCursor']
+            
+        except Exception as e:
+            print(f"\n    [!] Exception in GraphQL fetch: {e}")
+            break
+            
+    print(f"\n    [✓] Found {len(skipped_skus)} blacklisted SKUs from Live Notes.")
+    return skipped_skus
+
 def fetch_asmodee_release_calendar():
-    print("--- PHASE 0: SCRAPING RELEASE CALENDAR ---")
+    print("--- SCRAPING RELEASE CALENDAR ---")
     release_map = {} 
     try:
         r = session.get(ASMODEE_CALENDAR_URL, timeout=20)
         if r.status_code != 200: return {}
-        
         lines = r.text.split('\n')
         current_date_str = None
         current_year = datetime.now().year
@@ -204,7 +264,6 @@ def fetch_asmodee_release_calendar():
         for line in lines:
             clean_line = re.sub(r'<[^>]+>', '', line).strip()
             date_match = re.search(r'^([A-Z][a-z]+)\s+(\d+)(st|nd|rd|th)?', clean_line)
-            
             if date_match and date_match.group(1).lower() in month_map:
                 month_num = month_map[date_match.group(1).lower()]
                 calc_year = current_year
@@ -213,7 +272,6 @@ def fetch_asmodee_release_calendar():
                 try: current_date_str = f"{calc_year}-{month_num:02d}-{int(date_match.group(2)):02d}"
                 except: current_date_str = None
                 continue
-            
             if current_date_str and "Add to cart" not in clean_line and len(clean_line) > 5:
                 if clean_line.startswith("- ") or clean_line.startswith("• "):
                     prod_title = clean_line[2:].split("$")[0].strip().split(" - ")[0].strip()
@@ -245,8 +303,6 @@ def fetch_external_source(source_name, base_url):
 def compile_source_data(release_map, blacklist_set):
     print("\n--- PHASE 1 & 2: COMPILING SOURCE DATA ---")
     combined = {} 
-    
-    # 1. Scrape
     for name, url in EXTERNAL_SOURCES.items():
         if (name=="Moonstone" and not ENABLE_MOONSTONE) or (name=="Warsenal" and not ENABLE_WARSENAL) or (name=="Asmodee" and not ENABLE_ASMODEE): continue
         raw_products = fetch_external_source(name, url)
@@ -264,10 +320,7 @@ def compile_source_data(release_map, blacklist_set):
             for v in p.get('variants', []):
                 sku = v.get('sku', '').strip()
                 if not sku: continue
-                
-                # --- BLACKLIST CHECK (Optimization) ---
-                if sku in blacklist_set:
-                    continue 
+                if sku in blacklist_set: continue 
 
                 msrp = max(safe_float(v.get('price')), safe_float(v.get('compare_at_price')))
                 
@@ -291,30 +344,23 @@ def compile_source_data(release_map, blacklist_set):
                     "option3": v.get('option3')
                 }
 
-    # 2. Sheet
     if GOOGLE_CREDS_B64:
         print("    --> Fetching Google Sheet...")
         try:
             creds = get_google_creds()
             service = build('sheets', 'v4', credentials=creds)
             rows = service.spreadsheets().values().get(spreadsheetId=extract_sheet_id(SHEET_URL), range="A:Z").execute().get('values', [])
-            
             if rows:
                 headers = [h.lower().strip() for h in rows[0]]
                 idx_sku = headers.index('sku')
                 idx_title = headers.index('title')
                 idx_price = headers.index('price')
                 idx_vendor = headers.index('vendor') if 'vendor' in headers else -1
-                
                 for row in rows[1:]:
                     if len(row) <= idx_sku: continue
                     sku = row[idx_sku].strip()
                     if not sku or sku in combined: continue 
-                    
-                    # --- BLACKLIST CHECK ---
-                    if sku in blacklist_set:
-                        continue
-
+                    if sku in blacklist_set: continue
                     if not any(sku.upper().startswith(pre) for pre in ASMODEE_PREFIXES): continue 
                     
                     title = row[idx_title] if len(row) > idx_title else "Unknown"
@@ -341,7 +387,6 @@ def compile_source_data(release_map, blacklist_set):
                         "option2": None, "option3": None
                     }
         except Exception as e: print(f"    [!] Sheet Error: {e}")
-
     return combined
 
 def group_data_by_title(source_map):
@@ -353,11 +398,11 @@ def group_data_by_title(source_map):
     return grouped
 
 # ==========================================
-#        PHASE 3: LIVE CATALOG & ENRICHMENT
+#        PHASE 3: LIVE CATALOG (REST)
 # ==========================================
 
 def fetch_live_catalog():
-    print("\n--- PHASE 3: FETCHING LIVE SHOPIFY CATALOG ---")
+    print("\n--- PHASE 3: FETCHING LIVE SHOPIFY CATALOG (REST) ---")
     live_products_by_title = {} 
     
     for status in ["active", "draft", "archived"]:
@@ -379,7 +424,6 @@ def fetch_live_catalog():
                         "image_count": len(p.get('images', [])),
                         "variants": {} 
                     }
-                    
                     for v in p.get('variants', []):
                         sku = v.get('sku', '').strip()
                         if sku:
@@ -400,54 +444,8 @@ def fetch_live_catalog():
     print(f"    [✓] Loaded {len(live_products_by_title)} unique products.")
     return live_products_by_title
 
-def fetch_skips_worker(product_id):
-    """Worker: Fetches notes for one product ID."""
-    skipped = set()
-    try:
-        url = f"{get_shopify_base_url()}/products/{product_id}/metafields.json"
-        r = session.get(url, headers=HEADERS)
-        metafields = r.json().get('metafields', [])
-        
-        notes_list = []
-        for m in metafields:
-            if m['namespace'] == 'custom' and m['key'] == 'automation_notes':
-                try: notes_list = json.loads(m['value'])
-                except: pass
-                break
-        
-        for note in notes_list:
-            match = re.search(r"Donor SKU\s+(.*?)\.\s+Identical", note)
-            if match:
-                skipped.add(match.group(1).strip())
-    except: pass
-    return product_id, skipped
-
-def enrich_live_products_with_skips(live_products, target_titles, global_blacklist):
-    print("\n--- PHASE 3.5: ENRICHING (Fetching Live Notes) ---")
-    
-    # We only fetch notes for products we are about to touch OR have touched before
-    ids_to_fetch = []
-    for title in target_titles:
-        if title in live_products:
-            ids_to_fetch.append(live_products[title]['id'])
-    
-    print(f"    [i] Checking notes for {len(ids_to_fetch)} products...")
-    
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(fetch_skips_worker, pid): pid for pid in ids_to_fetch}
-        
-        for future in as_completed(futures):
-            pid, skipped_set = future.result()
-            
-            # 1. Update In-Memory Product Data (for immediate use)
-            # 2. Update Global Blacklist (for saving to file later)
-            if skipped_set:
-                global_blacklist.update(skipped_set)
-                
-    print("    [✓] Enrichment Complete.")
-
 # ==========================================
-#        PHASE 4: SYNC LOGIC (GROUPED)
+#        PHASE 4: SYNC LOGIC
 # ==========================================
 
 def update_automation_notes(product_id, new_notes):
@@ -553,7 +551,10 @@ def sync_product_group(title, variant_list, live_product, location_id, global_bl
             print(f"    [!] Error Creating {title}: {e}")
         return
 
-    # CASE 2: UPDATE (With In-Memory Global Blacklist)
+    # CASE 2: UPDATE 
+    
+    # We now skip fetching notes here because we did it in Phase 0 via GraphQL
+    
     notes_to_add = []
     ts = datetime.now().strftime('%Y-%m-%d')
     source_base = variant_list[0]
@@ -589,7 +590,6 @@ def sync_product_group(title, variant_list, live_product, location_id, global_bl
     for v_data in variant_list:
         sku = v_data['sku']
         
-        # --- MEMORY SKIP CHECK ---
         if sku in global_blacklist:
             continue
 
@@ -642,27 +642,27 @@ def sync_product_group(title, variant_list, live_product, location_id, global_bl
 # ==========================================
 
 def main():
-    print(f"--- STARTING UNIVERSAL SYNC V9: {datetime.now()} ---")
+    print(f"--- STARTING UNIVERSAL SYNC V11 (GRAPHQL HYBRID): {datetime.now()} ---")
     if not ACCESS_TOKEN: return
 
     deltona_id = get_location_id_by_name(TARGET_LOCATION_NAME)
     
-    # 1. Load Blacklist File (Fast)
+    # 1. Load File Blacklist
     global_blacklist = load_blacklist()
-    print(f"    [i] Loaded {len(global_blacklist)} SKUs from local blacklist file.")
+    print(f"    [i] Loaded {len(global_blacklist)} SKUs from file blacklist.")
 
-    # 2. Compile Source (Filtering via Blacklist immediately)
+    # 2. Fetch Live Notes via GraphQL (Fastest Way to get Blacklist)
+    graphql_blacklist = fetch_blacklist_from_notes_graphql()
+    global_blacklist.update(graphql_blacklist)
+
+    # 3. Compile Source (Filtering via Updated Blacklist)
     release_map = fetch_asmodee_release_calendar()
     source_map_flat = compile_source_data(release_map, global_blacklist) 
     grouped_source = group_data_by_title(source_map_flat)
     print(f"    [i] Grouped into {len(grouped_source)} unique Titles.")
     
-    # 3. Fetch Live
+    # 4. Fetch Live Catalog (REST)
     live_products = fetch_live_catalog()
-    
-    # 4. Enrich (Double Check Notes on Live Products)
-    # This ensures if we missed anything in the local file, we catch it now.
-    enrich_live_products_with_skips(live_products, grouped_source.keys(), global_blacklist)
     
     print(f"\n--- PHASE 4: EXECUTING UPDATES ---")
     
@@ -682,7 +682,7 @@ def main():
 
     update_status_file(f"Completed {total_titles} items.")
     
-    # 5. Save Updated Blacklist
+    # 5. Save Blacklist for future
     save_blacklist(global_blacklist)
     
     print("\n--- DONE ---")
