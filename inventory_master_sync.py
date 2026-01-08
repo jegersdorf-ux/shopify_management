@@ -35,6 +35,7 @@ SHEET_URL = os.environ.get("SHEET_URL", "https://docs.google.com/spreadsheets/d/
 GOOGLE_CREDS_B64 = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
 
 BLACKLIST_FILE = "blacklist.json"
+PROGRESS_FILE = "sync_progress.txt"
 
 EXTERNAL_SOURCES = {
     "Moonstone": "https://shop.moonstonethegame.com",
@@ -90,11 +91,16 @@ def create_retry_session(retries=3, backoff_factor=1, status_forcelist=(429, 500
 session = create_retry_session()
 
 def update_status_file(status_text):
+    """Writes progress to file AND prints to console."""
+    # Print to console so we see it immediately in logs
+    print(f"    [STATUS UPDATE] {status_text}")
+    
     try:
-        with open("sync_progress.txt", "w") as f:
+        with open(PROGRESS_FILE, "w") as f:
             f.write(f"Timestamp: {datetime.now()}\n")
-            f.write(f"Status: {status_text}")
-    except: pass
+            f.write(f"Status: {status_text}\n")
+    except Exception as e:
+        print(f"    [!] FAILED TO WRITE PROGRESS FILE: {e}")
 
 def safe_float(val):
     if not val: return 0.0
@@ -131,8 +137,9 @@ def save_blacklist(sku_set):
         sorted_skus = sorted(list(sku_set))
         with open(BLACKLIST_FILE, 'w') as f:
             json.dump({"skus": sorted_skus, "last_updated": str(datetime.now())}, f, indent=4)
-        print(f"    [✓] Saved {len(sorted_skus)} entries to {BLACKLIST_FILE}")
-    except Exception as e: print(f"    [!] Error saving blacklist: {e}")
+        print(f"    [SAVED] Blacklist updated ({len(sorted_skus)} items)")
+    except Exception as e: 
+        print(f"    [!] Error saving blacklist: {e}")
 
 # ==========================================
 #          BUSINESS LOGIC
@@ -179,10 +186,6 @@ def detect_game_system(vendor_raw, source_name):
 # ==========================================
 
 def fetch_blacklist_from_notes_graphql():
-    """
-    Uses GraphQL to efficiently fetch 'automation_notes' for ALL products
-    and extracts blacklisted SKUs.
-    """
     print("--- PHASE 0: GRAPHQL BLACKLIST FETCH ---")
     skipped_skus = set()
     url = f"https://{SHOP_URL}/admin/api/{API_VERSION}/graphql.json"
@@ -228,17 +231,14 @@ def fetch_blacklist_from_notes_graphql():
                 meta = node.get('metafield')
                 if meta and meta.get('value'):
                     try:
-                        # Value is a JSON string of a list
                         notes_list = json.loads(meta['value'])
                         if isinstance(notes_list, list):
                             for note in notes_list:
-                                # Regex to find "Donor SKU {SKU}. Identical"
                                 match = re.search(r"Donor SKU\s+(.*?)\.\s+Identical", note)
                                 if match:
                                     skipped_skus.add(match.group(1).strip())
                     except: pass
 
-            # Pagination
             has_next = products_data['pageInfo']['hasNextPage']
             cursor = products_data['pageInfo']['endCursor']
             
@@ -303,6 +303,7 @@ def fetch_external_source(source_name, base_url):
 def compile_source_data(release_map, blacklist_set):
     print("\n--- PHASE 1 & 2: COMPILING SOURCE DATA ---")
     combined = {} 
+    
     for name, url in EXTERNAL_SOURCES.items():
         if (name=="Moonstone" and not ENABLE_MOONSTONE) or (name=="Warsenal" and not ENABLE_WARSENAL) or (name=="Asmodee" and not ENABLE_ASMODEE): continue
         raw_products = fetch_external_source(name, url)
@@ -324,7 +325,7 @@ def compile_source_data(release_map, blacklist_set):
 
                 msrp = max(safe_float(v.get('price')), safe_float(v.get('compare_at_price')))
                 
-                combined[sku] = {
+                combined[sku.strip()] = {
                     "sku": sku,
                     "title": title,
                     "description": p.get('body_html', ''),
@@ -356,6 +357,7 @@ def compile_source_data(release_map, blacklist_set):
                 idx_title = headers.index('title')
                 idx_price = headers.index('price')
                 idx_vendor = headers.index('vendor') if 'vendor' in headers else -1
+                
                 for row in rows[1:]:
                     if len(row) <= idx_sku: continue
                     sku = row[idx_sku].strip()
@@ -552,9 +554,6 @@ def sync_product_group(title, variant_list, live_product, location_id, global_bl
         return
 
     # CASE 2: UPDATE 
-    
-    # We now skip fetching notes here because we did it in Phase 0 via GraphQL
-    
     notes_to_add = []
     ts = datetime.now().strftime('%Y-%m-%d')
     source_base = variant_list[0]
@@ -642,7 +641,7 @@ def sync_product_group(title, variant_list, live_product, location_id, global_bl
 # ==========================================
 
 def main():
-    print(f"--- STARTING UNIVERSAL SYNC V11 (GRAPHQL HYBRID): {datetime.now()} ---")
+    print(f"--- STARTING UNIVERSAL SYNC V13 (STRICT TRACKING): {datetime.now()} ---")
     if not ACCESS_TOKEN: return
 
     deltona_id = get_location_id_by_name(TARGET_LOCATION_NAME)
@@ -672,7 +671,11 @@ def main():
     for title, variants in grouped_source.items():
         if TEST_MODE and processed >= TEST_LIMIT: break
         
-        if processed % 5 == 0: update_status_file(f"Progress: {processed} / {total_titles} ({int(processed/total_titles*100)}%)")
+        # --- EVERY 25 ITEMS: SAVE & LOG ---
+        if processed % 25 == 0: 
+            percent = int(processed/total_titles*100) if total_titles > 0 else 0
+            update_status_file(f"Progress: {processed} / {total_titles} ({percent}%)")
+            save_blacklist(global_blacklist)
         
         live_prod = live_products.get(title)
         sync_product_group(title, variants, live_prod, deltona_id, global_blacklist)
@@ -682,7 +685,7 @@ def main():
 
     update_status_file(f"Completed {total_titles} items.")
     
-    # 5. Save Blacklist for future
+    # 5. Final Save
     save_blacklist(global_blacklist)
     
     print("\n--- DONE ---")
