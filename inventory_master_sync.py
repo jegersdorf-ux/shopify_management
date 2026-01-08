@@ -1,31 +1,16 @@
 import os
 import json
-import base64
 import requests
 import time
 import sys
 import warnings
 import re
-from datetime import datetime, timedelta
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from datetime import datetime
 
-# --- GOOGLE DEPENDENCIES ---
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
+# --- FORCE UNBUFFERED OUTPUT (Critical for GitHub Logs) ---
+sys.stdout.reconfigure(line_buffering=True)
 
-# --- PYTHON 3.9 COMPATIBILITY ---
-if sys.version_info < (3, 10):
-    import importlib.metadata
-    if not hasattr(importlib.metadata, 'packages_distributions'):
-        importlib.metadata.packages_distributions = lambda: {}
-
-# Suppress warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
-
-# ==========================================
-#              CONFIGURATION
-# ==========================================
+# --- CONFIGURATION ---
 SHOP_URL = os.environ.get("SHOPIFY_STORE_URL", "the-guillotine-life.myshopify.com")
 ACCESS_TOKEN = os.environ.get("SHOPIFY_ACCESS_TOKEN")
 API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2025-10")
@@ -71,36 +56,22 @@ KNOWN_FACTIONS = {
 #              HELPER FUNCTIONS
 # ==========================================
 
+print("--- SCRIPT INITIALIZING ---", flush=True)
+
 def get_shopify_base_url():
     return f"https://{SHOP_URL}/admin/api/{API_VERSION}"
 
-def create_retry_session(retries=3, backoff_factor=1, status_forcelist=(429, 500, 502, 503, 504)):
-    session = requests.Session()
-    retry = Retry(
-        total=retries,
-        read=retries,
-        connect=retries,
-        backoff_factor=backoff_factor,
-        status_forcelist=status_forcelist,
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount('https://', adapter)
-    session.mount('http://', adapter)
-    return session
-
-session = create_retry_session()
+# Simple Session Wrapper (No complex Retry Logic that hides errors)
+session = requests.Session()
+session.headers.update(HEADERS)
 
 def update_status_file(status_text):
-    """Writes progress to file AND prints to console."""
-    # Print to console so we see it immediately in logs
-    print(f"    [STATUS UPDATE] {status_text}")
-    
+    print(f"[STATUS] {status_text}", flush=True)
     try:
         with open(PROGRESS_FILE, "w") as f:
             f.write(f"Timestamp: {datetime.now()}\n")
             f.write(f"Status: {status_text}\n")
-    except Exception as e:
-        print(f"    [!] FAILED TO WRITE PROGRESS FILE: {e}")
+    except: pass
 
 def safe_float(val):
     if not val: return 0.0
@@ -116,8 +87,13 @@ def safe_int(val):
 
 def get_google_creds():
     if not GOOGLE_CREDS_B64: return None
-    creds_json = json.loads(base64.b64decode(GOOGLE_CREDS_B64).decode('utf-8'))
-    return service_account.Credentials.from_service_account_info(creds_json)
+    try:
+        from google.oauth2 import service_account
+        creds_json = json.loads(base64.b64decode(GOOGLE_CREDS_B64).decode('utf-8'))
+        return service_account.Credentials.from_service_account_info(creds_json)
+    except Exception as e:
+        print(f"[!] Google Creds Error: {e}", flush=True)
+        return None
 
 def extract_sheet_id(url):
     match = re.search(r"/d/([a-zA-Z0-9-_]+)", url)
@@ -137,9 +113,9 @@ def save_blacklist(sku_set):
         sorted_skus = sorted(list(sku_set))
         with open(BLACKLIST_FILE, 'w') as f:
             json.dump({"skus": sorted_skus, "last_updated": str(datetime.now())}, f, indent=4)
-        print(f"    [SAVED] Blacklist updated ({len(sorted_skus)} items)")
+        print(f"    [DISK] Saved Blacklist ({len(sorted_skus)} items)", flush=True)
     except Exception as e: 
-        print(f"    [!] Error saving blacklist: {e}")
+        print(f"    [!] Error saving blacklist: {e}", flush=True)
 
 # ==========================================
 #          BUSINESS LOGIC
@@ -186,7 +162,7 @@ def detect_game_system(vendor_raw, source_name):
 # ==========================================
 
 def fetch_blacklist_from_notes_graphql():
-    print("--- PHASE 0: GRAPHQL BLACKLIST FETCH ---")
+    print("--- PHASE 0: GRAPHQL BLACKLIST FETCH ---", flush=True)
     skipped_skus = set()
     url = f"https://{SHOP_URL}/admin/api/{API_VERSION}/graphql.json"
     
@@ -209,24 +185,25 @@ def fetch_blacklist_from_notes_graphql():
     
     while has_next:
         page_count += 1
-        print(f"    --> Fetching Page {page_count} (GraphQL)...", end="\r")
+        if page_count % 5 == 0:
+            print(f"    --> GraphQL Page {page_count}...", flush=True)
         
         try:
-            r = session.post(url, json={"query": query, "variables": {"cursor": cursor}}, headers=HEADERS)
+            # ADDED TIMEOUT HERE TO PREVENT HANGS
+            r = session.post(url, json={"query": query, "variables": {"cursor": cursor}}, headers=HEADERS, timeout=30)
             if r.status_code != 200:
-                print(f"\n    [!] GraphQL Error: {r.status_code}")
+                print(f"    [!] GraphQL Error: {r.status_code}", flush=True)
                 break
                 
             data = r.json()
             if "errors" in data:
-                print(f"\n    [!] GraphQL Query Error: {data['errors']}")
+                print(f"    [!] GraphQL Query Error: {data['errors']}", flush=True)
                 break
             
             products_data = data['data']['products']
-            edges = products_data['edges']
             
             # Parse this batch
-            for edge in edges:
+            for edge in products_data['edges']:
                 node = edge['node']
                 meta = node.get('metafield')
                 if meta and meta.get('value'):
@@ -243,19 +220,20 @@ def fetch_blacklist_from_notes_graphql():
             cursor = products_data['pageInfo']['endCursor']
             
         except Exception as e:
-            print(f"\n    [!] Exception in GraphQL fetch: {e}")
+            print(f"    [!] Exception in GraphQL fetch: {e}", flush=True)
             break
             
-    print(f"\n    [✓] Found {len(skipped_skus)} blacklisted SKUs from Live Notes.")
+    print(f"    [✓] Found {len(skipped_skus)} blacklisted SKUs.", flush=True)
     return skipped_skus
 
 def fetch_asmodee_release_calendar():
-    print("--- SCRAPING RELEASE CALENDAR ---")
+    print("--- SCRAPING RELEASE CALENDAR ---", flush=True)
     release_map = {} 
     try:
         r = session.get(ASMODEE_CALENDAR_URL, timeout=20)
         if r.status_code != 200: return {}
         lines = r.text.split('\n')
+        # ... (Same regex logic as before) ...
         current_date_str = None
         current_year = datetime.now().year
         today = datetime.now()
@@ -277,7 +255,7 @@ def fetch_asmodee_release_calendar():
                     prod_title = clean_line[2:].split("$")[0].strip().split(" - ")[0].strip()
                     if prod_title: release_map[prod_title.lower()] = current_date_str
     except Exception as e:
-        print(f"    [!] Error parsing calendar: {e}")
+        print(f"    [!] Error parsing calendar: {e}", flush=True)
     return release_map
 
 # ==========================================
@@ -285,7 +263,7 @@ def fetch_asmodee_release_calendar():
 # ==========================================
 
 def fetch_external_source(source_name, base_url):
-    print(f"    --> Scraping {source_name}...")
+    print(f"    --> Scraping {source_name}...", flush=True)
     products_found = []
     page = 1
     while True:
@@ -296,12 +274,13 @@ def fetch_external_source(source_name, base_url):
             if not batch: break 
             products_found.extend(batch)
             page += 1
-            time.sleep(0.5)
+            if page % 5 == 0: print(f"        Page {page}...", flush=True)
+            time.sleep(0.2)
         except: break
     return products_found
 
 def compile_source_data(release_map, blacklist_set):
-    print("\n--- PHASE 1 & 2: COMPILING SOURCE DATA ---")
+    print("\n--- PHASE 1 & 2: COMPILING SOURCE DATA ---", flush=True)
     combined = {} 
     
     for name, url in EXTERNAL_SOURCES.items():
@@ -346,8 +325,9 @@ def compile_source_data(release_map, blacklist_set):
                 }
 
     if GOOGLE_CREDS_B64:
-        print("    --> Fetching Google Sheet...")
+        print("    --> Fetching Google Sheet...", flush=True)
         try:
+            from googleapiclient.discovery import build
             creds = get_google_creds()
             service = build('sheets', 'v4', credentials=creds)
             rows = service.spreadsheets().values().get(spreadsheetId=extract_sheet_id(SHEET_URL), range="A:Z").execute().get('values', [])
@@ -388,7 +368,7 @@ def compile_source_data(release_map, blacklist_set):
                         "option1": "Default Title", 
                         "option2": None, "option3": None
                     }
-        except Exception as e: print(f"    [!] Sheet Error: {e}")
+        except Exception as e: print(f"    [!] Sheet Error: {e}", flush=True)
     return combined
 
 def group_data_by_title(source_map):
@@ -404,16 +384,16 @@ def group_data_by_title(source_map):
 # ==========================================
 
 def fetch_live_catalog():
-    print("\n--- PHASE 3: FETCHING LIVE SHOPIFY CATALOG (REST) ---")
+    print("\n--- PHASE 3: FETCHING LIVE SHOPIFY CATALOG (REST) ---", flush=True)
     live_products_by_title = {} 
     
     for status in ["active", "draft", "archived"]:
-        print(f"    --> Status: {status.upper()}...")
+        print(f"    --> Status: {status.upper()}...", flush=True)
         url = f"{get_shopify_base_url()}/products.json"
         params = {"limit": 250, "status": status}
         while url:
             try:
-                r = session.get(url, headers=HEADERS, params=params)
+                r = session.get(url, params=params, timeout=30)
                 data = r.json()
                 for p in data.get("products", []):
                     p_title = p['title'].strip()
@@ -442,8 +422,10 @@ def fetch_live_catalog():
                     url = [l for l in link.split(',') if 'rel="next"' in l][0].split(';')[0].strip('<> ')
                     params = {}
                 else: url = None
-            except: break
-    print(f"    [✓] Loaded {len(live_products_by_title)} unique products.")
+            except Exception as e: 
+                print(f"    [!] REST Error: {e}", flush=True)
+                break
+    print(f"    [✓] Loaded {len(live_products_by_title)} unique products.", flush=True)
     return live_products_by_title
 
 # ==========================================
@@ -460,7 +442,7 @@ def update_automation_notes(product_id, new_notes):
     metafield_id = None
     try:
         url = f"{get_shopify_base_url()}/products/{product_id}/metafields.json"
-        r = session.get(url, headers=HEADERS)
+        r = session.get(url, timeout=10)
         metafields = r.json().get('metafields', [])
         for m in metafields:
             if m['namespace'] == 'custom' and m['key'] == 'automation_notes':
@@ -485,12 +467,22 @@ def update_automation_notes(product_id, new_notes):
         if metafield_id:
             url = f"{get_shopify_base_url()}/products/{product_id}/metafields/{metafield_id}.json"
             payload['metafield']['id'] = metafield_id
-            session.put(url, json=payload, headers=HEADERS)
+            session.put(url, json=payload, timeout=10)
         else:
             url = f"{get_shopify_base_url()}/products/{product_id}/metafields.json"
-            session.post(url, json=payload, headers=HEADERS)
+            session.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"    [!] Failed to update notes: {e}")
+        print(f"    [!] Failed to update notes: {e}", flush=True)
+
+def get_location_id_by_name(target_name):
+    try:
+        r = session.get(f"{get_shopify_base_url()}/locations.json", timeout=10)
+        locations = r.json().get('locations', [])
+        for loc in locations:
+            if target_name.lower() in loc['name'].lower():
+                return loc['id']
+    except: pass
+    return None
 
 def sync_product_group(title, variant_list, live_product, location_id, global_blacklist):
     # CASE 1: CREATE
@@ -530,7 +522,7 @@ def sync_product_group(title, variant_list, live_product, location_id, global_bl
             })
 
         try:
-            r = session.post(f"{get_shopify_base_url()}/products.json", json={"product": prod_payload}, headers=HEADERS)
+            r = session.post(f"{get_shopify_base_url()}/products.json", json={"product": prod_payload}, timeout=10)
             r.raise_for_status()
             new_prod = r.json()['product']
             
@@ -540,17 +532,17 @@ def sync_product_group(title, variant_list, live_product, location_id, global_bl
                     session.put(
                         f"{get_shopify_base_url()}/inventory_items/{created_v['inventory_item_id']}.json",
                         json={"inventory_item": {"id": created_v['inventory_item_id'], "cost": f"{source_match['target_cost']:.2f}"}},
-                        headers=HEADERS
+                        timeout=10
                     )
                     if location_id:
                         session.post(
                             f"{get_shopify_base_url()}/inventory_levels/connect.json",
                             json={"inventory_item_id": created_v['inventory_item_id'], "location_id": location_id, "relocate_if_necessary": True},
-                            headers=HEADERS
+                            timeout=10
                         )
-            print(f"    [+] Created Product: {title}")
+            print(f"    [+] Created Product: {title}", flush=True)
         except Exception as e:
-            print(f"    [!] Error Creating {title}: {e}")
+            print(f"    [!] Error Creating {title}: {e}", flush=True)
         return
 
     # CASE 2: UPDATE 
@@ -577,12 +569,12 @@ def sync_product_group(title, variant_list, live_product, location_id, global_bl
 
     # 2a. Images
     if live_product['image_count'] == 0 and variant_list[0]['images']:
-        print(f"    [+] Injecting Images: {title}")
+        print(f"    [+] Injecting Images: {title}", flush=True)
         if not DRY_RUN:
             session.put(
                 f"{get_shopify_base_url()}/products/{live_product['id']}.json",
                 json={"product": {"id": live_product['id'], "images": variant_list[0]['images']}},
-                headers=HEADERS
+                timeout=10
             )
 
     # 2b. Variants
@@ -601,15 +593,15 @@ def sync_product_group(title, variant_list, live_product, location_id, global_bl
                     session.put(
                         f"{get_shopify_base_url()}/variants/{live_v['id']}.json",
                         json={"variant": {"id": live_v['id'], "price": f"{v_data['target_price']:.2f}", "compare_at_price": f"{v_data['target_compare']:.2f}"}},
-                        headers=HEADERS
+                        timeout=10
                     )
             session.put(
                 f"{get_shopify_base_url()}/inventory_items/{live_v['inventory_item_id']}.json",
                 json={"inventory_item": {"id": live_v['inventory_item_id'], "cost": f"{v_data['target_cost']:.2f}"}},
-                headers=HEADERS
+                timeout=10
             )
         else:
-            print(f"    [+] Adding Missing Variant {sku} to existing product {title}...")
+            print(f"    [+] Adding Missing Variant {sku} to existing product {title}...", flush=True)
             if not DRY_RUN:
                 var_payload = {
                     "sku": sku,
@@ -624,46 +616,47 @@ def sync_product_group(title, variant_list, live_product, location_id, global_bl
                     r = session.post(
                         f"{get_shopify_base_url()}/products/{live_product['id']}/variants.json",
                         json={"variant": var_payload},
-                        headers=HEADERS
+                        timeout=10
                     )
                     r.raise_for_status()
                     new_v = r.json()['variant']
                     session.put(
                         f"{get_shopify_base_url()}/inventory_items/{new_v['inventory_item_id']}.json",
                         json={"inventory_item": {"id": new_v['inventory_item_id'], "cost": f"{v_data['target_cost']:.2f}"}},
-                        headers=HEADERS
+                        timeout=10
                     )
                 except Exception as e:
-                    print(f"       [!] Failed to add variant {sku}: {e}")
+                    print(f"       [!] Failed to add variant {sku}: {e}", flush=True)
 
 # ==========================================
 #              MAIN EXECUTION
 # ==========================================
 
 def main():
-    print(f"--- STARTING UNIVERSAL SYNC V13 (STRICT TRACKING): {datetime.now()} ---")
-    if not ACCESS_TOKEN: return
+    if not ACCESS_TOKEN:
+        print("[!] ERROR: Missing SHOPIFY_ACCESS_TOKEN", flush=True)
+        return
 
     deltona_id = get_location_id_by_name(TARGET_LOCATION_NAME)
     
     # 1. Load File Blacklist
     global_blacklist = load_blacklist()
-    print(f"    [i] Loaded {len(global_blacklist)} SKUs from file blacklist.")
+    print(f"    [i] Loaded {len(global_blacklist)} SKUs from file blacklist.", flush=True)
 
-    # 2. Fetch Live Notes via GraphQL (Fastest Way to get Blacklist)
+    # 2. Fetch Live Notes via GraphQL
     graphql_blacklist = fetch_blacklist_from_notes_graphql()
     global_blacklist.update(graphql_blacklist)
 
-    # 3. Compile Source (Filtering via Updated Blacklist)
+    # 3. Compile Source
     release_map = fetch_asmodee_release_calendar()
     source_map_flat = compile_source_data(release_map, global_blacklist) 
     grouped_source = group_data_by_title(source_map_flat)
-    print(f"    [i] Grouped into {len(grouped_source)} unique Titles.")
+    print(f"    [i] Grouped into {len(grouped_source)} unique Titles.", flush=True)
     
     # 4. Fetch Live Catalog (REST)
     live_products = fetch_live_catalog()
     
-    print(f"\n--- PHASE 4: EXECUTING UPDATES ---")
+    print(f"\n--- PHASE 4: EXECUTING UPDATES ---", flush=True)
     
     total_titles = len(grouped_source)
     processed = 0
@@ -671,7 +664,7 @@ def main():
     for title, variants in grouped_source.items():
         if TEST_MODE and processed >= TEST_LIMIT: break
         
-        # --- EVERY 25 ITEMS: SAVE & LOG ---
+        # --- SAVE/LOG EVERY 25 ITEMS ---
         if processed % 25 == 0: 
             percent = int(processed/total_titles*100) if total_titles > 0 else 0
             update_status_file(f"Progress: {processed} / {total_titles} ({percent}%)")
@@ -684,11 +677,9 @@ def main():
         time.sleep(0.5)
 
     update_status_file(f"Completed {total_titles} items.")
-    
-    # 5. Final Save
     save_blacklist(global_blacklist)
     
-    print("\n--- DONE ---")
+    print("\n--- DONE ---", flush=True)
 
 if __name__ == "__main__":
     main()
