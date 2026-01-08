@@ -56,7 +56,7 @@ KNOWN_FACTIONS = {
 #              HELPER FUNCTIONS
 # ==========================================
 
-print("--- SCRIPT INITIALIZING ---", flush=True)
+print("--- SCRIPT INITIALIZING V15 ---", flush=True)
 
 def get_shopify_base_url():
     return f"https://{SHOP_URL}/admin/api/{API_VERSION}"
@@ -166,9 +166,10 @@ def fetch_blacklist_from_notes_graphql():
     skipped_skus = set()
     url = f"https://{SHOP_URL}/admin/api/{API_VERSION}/graphql.json"
     
+    # REDUCED BATCH SIZE TO 50 TO PREVENT "BAD REQUEST" / TIMEOUTS
     query = """
     query ($cursor: String) {
-      products(first: 250, after: $cursor) {
+      products(first: 50, after: $cursor) {
         pageInfo { hasNextPage, endCursor }
         edges {
           node {
@@ -189,17 +190,23 @@ def fetch_blacklist_from_notes_graphql():
             print(f"    --> GraphQL Page {page_count}...", flush=True)
         
         try:
-            # ADDED TIMEOUT HERE TO PREVENT HANGS
             r = session.post(url, json={"query": query, "variables": {"cursor": cursor}}, headers=HEADERS, timeout=30)
+            
+            # --- DEBUGGING GRAPHQL ERRORS ---
             if r.status_code != 200:
-                print(f"    [!] GraphQL Error: {r.status_code}", flush=True)
+                print(f"    [!] GraphQL HTTP Error: {r.status_code}", flush=True)
+                print(f"    [!] Response Body: {r.text}", flush=True) # PRINT THE REASON
                 break
                 
             data = r.json()
             if "errors" in data:
-                print(f"    [!] GraphQL Query Error: {data['errors']}", flush=True)
+                print(f"    [!] GraphQL Query Error: {json.dumps(data['errors'])}", flush=True)
                 break
             
+            if "data" not in data or "products" not in data["data"]:
+                print(f"    [!] Unexpected GraphQL Response format: {data.keys()}", flush=True)
+                break
+
             products_data = data['data']['products']
             
             # Parse this batch
@@ -223,7 +230,7 @@ def fetch_blacklist_from_notes_graphql():
             print(f"    [!] Exception in GraphQL fetch: {e}", flush=True)
             break
             
-    print(f"    [✓] Found {len(skipped_skus)} blacklisted SKUs.", flush=True)
+    print(f"    [✓] Found {len(skipped_skus)} blacklisted SKUs via GraphQL.", flush=True)
     return skipped_skus
 
 def fetch_asmodee_release_calendar():
@@ -664,7 +671,7 @@ def main():
     for title, variants in grouped_source.items():
         if TEST_MODE and processed >= TEST_LIMIT: break
         
-        # --- SAVE/LOG EVERY 25 ITEMS ---
+        # --- EVERY 25 ITEMS: SAVE & LOG ---
         if processed % 25 == 0: 
             percent = int(processed/total_titles*100) if total_titles > 0 else 0
             update_status_file(f"Progress: {processed} / {total_titles} ({percent}%)")
