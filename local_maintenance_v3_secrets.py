@@ -16,8 +16,6 @@ sys.stdout.reconfigure(line_buffering=True)
 print("--- MAINTENANCE SCRIPT INITIALIZING (PRE-ORDER CLEANUP) ---", flush=True)
 
 # --- 1. SETUP CREDENTIALS (SECURE) ---
-
-# Try to get variables from Environment (Works on GitHub Actions & Local if set)
 ACCESS_TOKEN = os.environ.get("SHOPIFY_ACCESS_TOKEN")
 SHOP_URL = os.environ.get("SHOPIFY_STORE_URL")
 
@@ -25,19 +23,14 @@ SHOP_URL = os.environ.get("SHOPIFY_STORE_URL")
 if not ACCESS_TOKEN:
     print("\n    [!] CRITICAL ERROR: SHOPIFY_ACCESS_TOKEN is missing.", flush=True)
     print("    ---------------------------------------------------")
-    print("    To run this locally, do NOT hardcode the token.")
-    print("    Instead, set it in your terminal before running python:")
-    print("    ")
-    print("    PowerShell:")
+    print("    To run this locally, use environment variables:")
     print('    $env:SHOPIFY_ACCESS_TOKEN="shpat_YOUR_NEW_TOKEN_HERE"')
     print('    $env:SHOPIFY_STORE_URL="extraturngames.myshopify.com"')
-    print("    python local_maintenance_v3_secure.py")
+    print("    python local_maintenance_v4_syntax_fix.py")
     print("    ---------------------------------------------------\n")
     sys.exit(1)
 
 if not SHOP_URL:
-    # Default URL is less risky to hardcode, but better to keep uniform
-    print("    [i] No Store URL found in environment. Defaulting to Extra Turn Games.")
     SHOP_URL = "extraturngames.myshopify.com"
 
 # Safety Cleanup
@@ -81,7 +74,9 @@ def run_query(query, variables=None):
 def fetch_targeted_products():
     print("--- PHASE 1: SEARCHING CANDIDATES ---", flush=True)
     
-    search_query = "tag:Pre-Order OR tag:\"New Release\""
+    # FIX: Triple escaped quotes for GraphQL string interpolation
+    # This ensures the final query is: tag:Pre-Order OR tag:\"New Release\"
+    search_query = "tag:Pre-Order OR tag:\\\"New Release\\\""
     
     q_staged = """
     mutation {
@@ -109,11 +104,23 @@ def fetch_targeted_products():
     """ % search_query
     
     res = run_query(q_staged)
-    if not res or res.get('data', {}).get('bulkOperationRunQuery', {}).get('userErrors'):
-        print(f"    [!] Fetch Failed: {res}")
+    
+    # Check for errors immediately
+    if not res:
+        print("    [!] Fetch Failed: No response from Shopify.")
+        return []
+    
+    user_errors = res.get('data', {}).get('bulkOperationRunQuery', {}).get('userErrors')
+    if user_errors:
+        print(f"    [!] Fetch Failed: {user_errors}")
         return []
 
-    op_id = res['data']['bulkOperationRunQuery']['bulkOperation']['id']
+    op_data = res.get('data', {}).get('bulkOperationRunQuery', {}).get('bulkOperation')
+    if not op_data:
+        print(f"    [!] Fetch Failed: No bulk operation returned. Full response: {res}")
+        return []
+
+    op_id = op_data['id']
     print(f"    [i] Search Job Started: {op_id}", flush=True)
 
     result_url = None
@@ -138,7 +145,9 @@ def fetch_targeted_products():
     
     for line in r_file.text.split('\n'):
         if not line.strip(): continue
-        products.append(json.loads(line))
+        try:
+            products.append(json.loads(line))
+        except: pass
             
     print(f"    [✓] Found {len(products)} products to analyze.", flush=True)
     return products
