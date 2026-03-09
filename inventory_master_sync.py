@@ -5,7 +5,7 @@ import time
 import sys
 import warnings
 import re
-import base64 # <-- FIXED: Added missing base64 import
+import base64 
 import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime
@@ -32,7 +32,7 @@ EXTERNAL_SOURCES = {
 }
 ASMODEE_CALENDAR_URL = "https://store.asmodee.com/pages/release-calendar"
 
-DRY_RUN = False         
+DRY_RUN = True         
 TEST_MODE = False         
 TEST_LIMIT = 20         
 ENABLE_MOONSTONE = True
@@ -72,7 +72,7 @@ PRICE_DISCREPANCIES = []
 #              HELPER FUNCTIONS
 # ==========================================
 
-print("--- SCRIPT INITIALIZING V16 ---", flush=True)
+print("--- SCRIPT INITIALIZING V17 ---", flush=True)
 
 def get_shopify_base_url():
     return f"https://{SHOP_URL}/admin/api/{API_VERSION}"
@@ -302,9 +302,9 @@ def compile_source_data(release_map, blacklist_set):
         raw_products = fetch_external_source(name, url)
         
         for p in raw_products:
-            raw_vendor = p.get('vendor', '')
+            raw_vendor = p.get('vendor') or ''
             if name == "Moonstone" and not raw_vendor: raw_vendor = "Goblin King Games"
-            title = p.get('title', 'Unknown')
+            title = p.get('title') or 'Unknown'
             tags_list = str(p.get('tags', [])).split(',')
             faction = determine_faction(raw_vendor, title, tags_list)
             game_system = detect_game_system(raw_vendor, name)
@@ -312,20 +312,22 @@ def compile_source_data(release_map, blacklist_set):
             images = [{"src": img['src']} for img in p.get('images', [])]
 
             for v in p.get('variants', []):
-                sku = v.get('sku', '').strip()
+                # FIXED: Handle NoneType gracefully
+                sku = (v.get('sku') or "").strip()
                 if not sku: continue
                 if sku in blacklist_set: continue 
 
                 msrp = max(safe_float(v.get('price')), safe_float(v.get('compare_at_price')))
+                barcode = (v.get('barcode') or "").strip()
                 
-                combined[sku.strip()] = {
+                combined[sku] = {
                     "sku": sku,
                     "title": title,
-                    "description": p.get('body_html', ''),
+                    "description": p.get('body_html') or '',
                     "product_type": game_system,
                     "images": images,
                     "weight": safe_int(v.get('grams')),
-                    "barcode": v.get('barcode', ''),
+                    "barcode": barcode,
                     "target_compare": msrp,
                     "target_price": msrp,
                     "target_cost": calculate_cost(msrp, raw_vendor, name),
@@ -354,7 +356,7 @@ def compile_source_data(release_map, blacklist_set):
                 
                 for row in rows[1:]:
                     if len(row) <= idx_sku: continue
-                    sku = row[idx_sku].strip()
+                    sku = (row[idx_sku] or "").strip()
                     if not sku or sku in combined: continue 
                     if sku in blacklist_set: continue
                     if not any(sku.upper().startswith(pre) for pre in ASMODEE_PREFIXES): continue 
@@ -410,7 +412,7 @@ def fetch_live_catalog():
                 r = session.get(url, params=params, timeout=30)
                 data = r.json()
                 for p in data.get("products", []):
-                    p_title = p['title'].strip()
+                    p_title = str(p.get('title') or '').strip()
                     p_data = {
                         "id": p['id'],
                         "status": p['status'],
@@ -421,7 +423,7 @@ def fetch_live_catalog():
                         "variants": {} 
                     }
                     for v in p.get('variants', []):
-                        sku = v.get('sku', '').strip()
+                        sku = (v.get('sku') or "").strip()
                         if sku:
                             p_data["variants"][sku] = {
                                 "id": v['id'],
@@ -686,7 +688,8 @@ def send_discrepancy_report():
     try:
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
-            # server.login(SMTP_USER, SMTP_PASS) # Uncomment and set SMTP_PASS in config to authenticate
+            if SMTP_USER and SMTP_PASS: 
+                server.login(SMTP_USER, SMTP_PASS) 
             server.send_message(msg)
         print("    [+] Alert email sent successfully.", flush=True)
     except Exception as e:
