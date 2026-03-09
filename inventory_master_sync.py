@@ -5,6 +5,9 @@ import time
 import sys
 import warnings
 import re
+import base64 # <-- FIXED: Added missing base64 import
+import smtplib
+from email.mime.text import MIMEText
 from datetime import datetime
 
 # --- FORCE UNBUFFERED OUTPUT (Critical for GitHub Logs) ---
@@ -36,6 +39,16 @@ ENABLE_MOONSTONE = True
 ENABLE_WARSENAL = True
 ENABLE_ASMODEE = True
 
+# --- NEW CONFIGURATIONS ---
+MAINTAIN_CURRENT_PRICES = True # Set to False if you want the script to overwrite existing prices
+
+# SMTP Email Configuration for Alerts
+SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASS = os.environ.get("SMTP_PASS", "") 
+ALERT_EMAIL = "info@guillotine-life.com"
+
 HEADERS = {
     "X-Shopify-Access-Token": ACCESS_TOKEN,
     "Content-Type": "application/json"
@@ -52,16 +65,18 @@ KNOWN_FACTIONS = {
     "moonstone": ["Commonwealth", "Dominion", "Leshavult", "Shades", "Gnomes", "Fairies"]
 }
 
+# Global list to hold price discrepancies
+PRICE_DISCREPANCIES = []
+
 # ==========================================
 #              HELPER FUNCTIONS
 # ==========================================
 
-print("--- SCRIPT INITIALIZING V15 ---", flush=True)
+print("--- SCRIPT INITIALIZING V16 ---", flush=True)
 
 def get_shopify_base_url():
     return f"https://{SHOP_URL}/admin/api/{API_VERSION}"
 
-# Simple Session Wrapper (No complex Retry Logic that hides errors)
 session = requests.Session()
 session.headers.update(HEADERS)
 
@@ -99,7 +114,6 @@ def extract_sheet_id(url):
     match = re.search(r"/d/([a-zA-Z0-9-_]+)", url)
     return match.group(1) if match else None
 
-# --- BLACKLIST FILE MANAGEMENT ---
 def load_blacklist():
     if not os.path.exists(BLACKLIST_FILE): return set()
     try:
@@ -118,7 +132,7 @@ def save_blacklist(sku_set):
         print(f"    [!] Error saving blacklist: {e}", flush=True)
 
 # ==========================================
-#          BUSINESS LOGIC
+#        BUSINESS LOGIC
 # ==========================================
 
 def calculate_cost(msrp, vendor_name, source_name=""):
@@ -166,7 +180,6 @@ def fetch_blacklist_from_notes_graphql():
     skipped_skus = set()
     url = f"https://{SHOP_URL}/admin/api/{API_VERSION}/graphql.json"
     
-    # REDUCED BATCH SIZE TO 50 TO PREVENT "BAD REQUEST" / TIMEOUTS
     query = """
     query ($cursor: String) {
       products(first: 50, after: $cursor) {
@@ -191,11 +204,8 @@ def fetch_blacklist_from_notes_graphql():
         
         try:
             r = session.post(url, json={"query": query, "variables": {"cursor": cursor}}, headers=HEADERS, timeout=30)
-            
-            # --- DEBUGGING GRAPHQL ERRORS ---
             if r.status_code != 200:
                 print(f"    [!] GraphQL HTTP Error: {r.status_code}", flush=True)
-                print(f"    [!] Response Body: {r.text}", flush=True) # PRINT THE REASON
                 break
                 
             data = r.json()
@@ -204,12 +214,10 @@ def fetch_blacklist_from_notes_graphql():
                 break
             
             if "data" not in data or "products" not in data["data"]:
-                print(f"    [!] Unexpected GraphQL Response format: {data.keys()}", flush=True)
                 break
 
             products_data = data['data']['products']
             
-            # Parse this batch
             for edge in products_data['edges']:
                 node = edge['node']
                 meta = node.get('metafield')
@@ -240,7 +248,6 @@ def fetch_asmodee_release_calendar():
         r = session.get(ASMODEE_CALENDAR_URL, timeout=20)
         if r.status_code != 200: return {}
         lines = r.text.split('\n')
-        # ... (Same regex logic as before) ...
         current_date_str = None
         current_year = datetime.now().year
         today = datetime.now()
@@ -568,8 +575,20 @@ def sync_product_group(title, variant_list, live_product, location_id, global_bl
 
         if sku in live_product['variants']:
             live_v = live_product['variants'][sku]
-            if abs(live_v['price'] - v_data['target_price']) > 0.01:
-                notes_to_add.append(f"[{ts}] Price Diff ({sku}): Live {live_v['price']} vs Source {v_data['target_price']}")
+            
+            # --- FEATURE: Record discrepancies for the email summary ---
+            old_price = live_v['price']
+            new_price = v_data['target_price']
+            
+            if abs(old_price - new_price) > 0.01:
+                PRICE_DISCREPANCIES.append({
+                    "sku": sku,
+                    "title": title,
+                    "old": old_price,
+                    "new": new_price,
+                    "variance": new_price - old_price
+                })
+                notes_to_add.append(f"[{ts}] Price Diff ({sku}): Live {old_price} vs Source {new_price}")
 
     if notes_to_add:
         update_automation_notes(live_product['id'], notes_to_add)
@@ -595,18 +614,23 @@ def sync_product_group(title, variant_list, live_product, location_id, global_bl
             live_v = live_product['variants'][sku]
             if live_product['image_count'] > 0: continue 
             
-            if live_v['compare_at'] != v_data['target_compare']:
-                if not DRY_RUN:
-                    session.put(
-                        f"{get_shopify_base_url()}/variants/{live_v['id']}.json",
-                        json={"variant": {"id": live_v['id'], "price": f"{v_data['target_price']:.2f}", "compare_at_price": f"{v_data['target_compare']:.2f}"}},
-                        timeout=10
-                    )
-            session.put(
-                f"{get_shopify_base_url()}/inventory_items/{live_v['inventory_item_id']}.json",
-                json={"inventory_item": {"id": live_v['inventory_item_id'], "cost": f"{v_data['target_cost']:.2f}"}},
-                timeout=10
-            )
+            # --- FEATURE: Honor the MAINTAIN_CURRENT_PRICES flag ---
+            if not MAINTAIN_CURRENT_PRICES:
+                if live_v['compare_at'] != v_data['target_compare'] or abs(live_v['price'] - v_data['target_price']) > 0.01:
+                    if not DRY_RUN:
+                        session.put(
+                            f"{get_shopify_base_url()}/variants/{live_v['id']}.json",
+                            json={"variant": {"id": live_v['id'], "price": f"{v_data['target_price']:.2f}", "compare_at_price": f"{v_data['target_compare']:.2f}"}},
+                            timeout=10
+                        )
+            
+            # Cost is internal, we can still update it safely regardless of the price flag
+            if not DRY_RUN:
+                session.put(
+                    f"{get_shopify_base_url()}/inventory_items/{live_v['inventory_item_id']}.json",
+                    json={"inventory_item": {"id": live_v['inventory_item_id'], "cost": f"{v_data['target_cost']:.2f}"}},
+                    timeout=10
+                )
         else:
             print(f"    [+] Adding Missing Variant {sku} to existing product {title}...", flush=True)
             if not DRY_RUN:
@@ -634,6 +658,40 @@ def sync_product_group(title, variant_list, live_product, location_id, global_bl
                     )
                 except Exception as e:
                     print(f"       [!] Failed to add variant {sku}: {e}", flush=True)
+
+# ==========================================
+#        PHASE 5: EMAIL ALERTS
+# ==========================================
+
+def send_discrepancy_report():
+    if not PRICE_DISCREPANCIES:
+        print("    [i] No price discrepancies found. Skipping email.", flush=True)
+        return
+        
+    print(f"    [i] Sending discrepancy report for {len(PRICE_DISCREPANCIES)} items...", flush=True)
+    
+    # Format the table for the email body
+    body = "The following price discrepancies were found during the sync process:\n\n"
+    body += f"{'SKU':<15} | {'Old Price':<10} | {'New Price':<10} | {'Variance':<10} | {'Title'}\n"
+    body += "-" * 80 + "\n"
+    
+    for item in PRICE_DISCREPANCIES:
+        body += f"{item['sku']:<15} | ${item['old']:<9.2f} | ${item['new']:<9.2f} | ${item['variance']:<9.2f} | {item['title']}\n"
+        
+    msg = MIMEText(body)
+    msg['Subject'] = f"Shopify Sync: {len(PRICE_DISCREPANCIES)} Price Discrepancies Detected"
+    msg['From'] = SMTP_USER
+    msg['To'] = ALERT_EMAIL
+    
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            # server.login(SMTP_USER, SMTP_PASS) # Uncomment and set SMTP_PASS in config to authenticate
+            server.send_message(msg)
+        print("    [+] Alert email sent successfully.", flush=True)
+    except Exception as e:
+        print(f"    [!] Error sending alert email: {e}", flush=True)
+
 
 # ==========================================
 #              MAIN EXECUTION
@@ -685,6 +743,9 @@ def main():
 
     update_status_file(f"Completed {total_titles} items.")
     save_blacklist(global_blacklist)
+    
+    # --- PHASE 5: Send Alert Email ---
+    send_discrepancy_report()
     
     print("\n--- DONE ---", flush=True)
 
