@@ -32,7 +32,7 @@ EXTERNAL_SOURCES = {
 }
 ASMODEE_CALENDAR_URL = "https://store.asmodee.com/pages/release-calendar"
 
-DRY_RUN = True         
+DRY_RUN = False         
 TEST_MODE = False         
 TEST_LIMIT = 20         
 ENABLE_MOONSTONE = True
